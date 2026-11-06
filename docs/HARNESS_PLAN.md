@@ -94,16 +94,28 @@ Design rules:
   (URL literals, `href`/`data-num` selectors, host suffix lists) exists
   outside `SiteConfig.java` in `src/`.
 
-### Phase 4 — Remaining work (not started, needs a real target site)
-- **Fill `SiteConfig` for a real site** using `docs/AGENT_GUIDE.md`
-  validation checklist (item regexes against saved HTML, player
-  selectors live in a WebView). This is the first real plug-in test and
-  the moment any placeholder assumption (e.g. `<div>`-based items) is
-  validated or replaced.
-- **Generalise item blocks beyond `<div class=item>`** if a target site
-  uses `<li>`/`<article>`: add a `ITEM_BLOCK_TAG` constant and switch the
-  balanced-tag scanner in `CatalogScraper.itemBlocks` to that tag only
-  (mechanical change).
+### Phase 4 — Remaining work (from the 67movies.st fork — first real plug-in)
+
+The first site test (`tv-harness-67movies`, 2026-11-06) proved the
+harness works end-to-end for an SPA/modal-detail site, but needed fork
+code to do it. Upstream candidates (in priority order):
+
+- **RSC/Next.js JSON catalogue mode.** 67movies renders cards
+  client-side from React Server Component flight JSON in the HTML —
+  the div-block scraper finds nothing. Port the fork's JSON mode as a
+  first-class `ITEM_FORMAT` (html | nextjs-json) in `CatalogScraper`
+  (rail key from the tab path, bracket-matched `"items":[...]` array,
+  ordered 3-step unescape — see `docs/AGENT_GUIDE.md` Step 0.5).
+- **Generic site-control seam.** TV season `<select>`/episode cards are
+  not remote-controllable today (fork left them a limitation). A
+  `CONTROL_SELECTOR` + `CONTROL_VALUE` hook would let configs drive
+  `<select>` pickers without fork code.
+- **Tab-bar overflow fix.** Six tabs + REFRESH squeeze the brand label
+  to zero width; make the tab row horizontally scrollable or shrink
+  tabs with the count in `CatalogActivity`.
+- **Generalise item blocks beyond `<div class=item>`** if a future
+  target site uses `<li>`/`<article>`: add `ITEM_BLOCK_TAG` and switch
+  the balanced-tag scanner only (mechanical).
 - **Keystore sample**: ship a debug-only unsigned/assemble path so
   agents can compile-check without a personal keystore (currently
   `build.sh` requires `HARNESS_KEYSTORE*` to sign).
@@ -111,6 +123,18 @@ Design rules:
   `docs/fixtures/` so regexes can be regression-tested in a unit test
   harness (this repo has no test runner today; that would be its first
   test).
+
+#### Site-fork policy (learned from I-9/I-14 of the 67movies fork)
+
+- Each site test lives in its own repo, seeded as a **copy** of this
+  harness `main`. GitHub forbids a same-account fork ("A single user
+  account cannot own both a parent and fork"), so forks are functional
+  copies, not network forks.
+- Site repos never merge back. Improvements flow **one way, upstream
+  only**: cherry-pick the generic fix + docs, leave site config behind.
+- Agents must use **absolute paths** when writing inside a fork dir and
+  re-check this repo is clean after every edit (relative paths poison
+  main).
 
 ## Status
 
@@ -121,4 +145,9 @@ Design rules:
 - [x] Phase 2 docs (`API.md`, `AGENT_GUIDE.md`, `REQUIREMENTS.md`,
       this plan, updated `README.md`/`ARCHITECTURE.md`/`BUILDING.md`)
 - [x] Phase 3 guard rails (`scripts/check-site-refs.sh`)
-- [ ] Phase 4 first real plug-in (needs a chosen target site)
+- [x] First real plug-in: `tv-harness-67movies` (67movies.st) — SPA
+      catalogue, modal player, Fire TV verified; see that fork's
+      `docs/INVESTIGATION.md` + `docs/ISSUES.md`
+- [x] Backport of generic fixes: empty-selector guards, focus watcher
+      window (~4 min + scrollIntoView), episode-button hiding (this commit)
+- [ ] Phase 4 upstream tasks above (RSC JSON mode, control seam, tab-row)

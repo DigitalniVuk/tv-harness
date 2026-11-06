@@ -6,9 +6,12 @@ The harness is deliberately dumb: it scrapes listing HTML and plays pages.
 A website needs all of the following, or the corresponding harness feature
 degrades or must be removed from `SiteConfig`.
 
-- **Server-rendered listing pages.** Every catalogue page must contain the
-  items in its initial HTML (no client-side rendering, no login wall, no
-  bot challenge). Listing pages are fetched twice per refresh (cache-bust
+- **Server-rendered listing pages — or embedded data.** Every catalogue
+  page must contain the items in its initial HTML (no client-side
+  rendering, no login wall, no bot challenge). Next.js/RSC sites embed
+  their items as flight JSON in the HTML instead of cards — the bundled
+  HTML scraper then needs a JSON mode (see `AGENT_GUIDE.md` Step 0.5);
+  assume it may be needed until `curl` proves otherwise. Listing pages are fetched twice per refresh (cache-bust
   query parameter `__tv_refresh=<nanoTime>`) and must be idempotent.
 - **Absolute or root-relative links.** Item URLs must be absolute or start
   with `/`; the harness resolves them against `BASE_URL` only.
@@ -16,7 +19,12 @@ degrades or must be removed from `SiteConfig`.
   `https://` and listable in `ALLOWED_IMAGE_PREFIXES`. Relative poster
   URLs are resolved but may fail the allowlist check.
 - **A WebView-playable player page.** The item/player page must load with
-  JavaScript and DOM storage enabled and play media without a tap. The
+  JavaScript and DOM storage enabled and play media without a tap.
+  SPA detail pages often render their player only after a client-side
+  data fetch (tens of seconds on slow TVs): the harness focus watcher
+  retries for ~4 minutes, and your `PLAYER_FOCUS_SELECTOR` must match
+  the real start control. A third-party embed iframe is fine, but a
+  media server that geo-gates sources per network will not play anywhere off that network — verify the media API, not the WebView. The
   site's player must be reachable from `document.querySelector` (see the
   selector contract in `docs/API.md`) and, for pause/resume, must listen
   to the Space key or expose a clickable pause control.

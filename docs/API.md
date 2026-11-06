@@ -118,7 +118,7 @@ Selectors come from `SiteConfig` (shown in `<>`). An empty selector means
 | Operation | JS performed |
 |---|---|
 | Customise page | Inject a `<style>` element: hide `<>PLAYER_HIDE_CSS`, force-expand `<>PLAYER_KEEP_SELECTORS`, centre `<>PLAYER_ELEMENT_SELECTOR` in 16:9, stretch `<>PLAYER_FRAME_SELECTOR` to fill it. Replaces `window.open`/`alert` with no-ops. |
-| Initial focus | Every 500 ms (max 15 s): focus `<>PLAYER_FOCUS_SELECTOR` if visible, else the first `<>PLAYER_FRAME_SELECTOR`; sets `tabindex="0"` first. |
+| Initial focus | Every 500 ms (max ~4 min — SPA pages render their player long after `onPageFinished`): scroll `<>PLAYER_FOCUS_SELECTOR` into view, then focus it if visible, else the first `<>PLAYER_FRAME_SELECTOR`; sets `tabindex="0"` first. |
 | List episodes | `document.querySelectorAll(<EPISODE_LIST_SELECTOR>)`; number = `a[EPISODE_NUM_ATTR]` or text, name = `title` attr or text; active = `<>EPISODE_ACTIVE_SELECTOR`. Returns `{current, episodes[]}` as JSON. |
 | Select episode | Click the anchor from `<>EPISODE_LIST_SELECTOR` whose number (same rule) equals the picked number. |
 | Previous / next | `document.querySelector(<PREV_/NEXT_EPISODE_SELECTOR>).click()` |

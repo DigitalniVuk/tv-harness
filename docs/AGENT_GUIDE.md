@@ -13,6 +13,36 @@ with `example.com` TODOs. Keep a pristine copy (e.g. `git checkout
 SiteConfig.java` restores it). Never commit a filled-in real site's values
 back as the template.
 
+> **Fork discipline (learned the hard way).** Every site test lives in
+> its own repo (seeded copy of this harness `main`; GitHub forbids a
+> same-account fork — see `docs/HARNESS_PLAN.md`). Always resolve
+> **absolute paths** before writing into a fork dir, and verify after
+> each edit that this main repo is still clean
+> (`git -C <main> status` must be empty).
+
+## Step 0.5 — Classify the site first: HTML cards or RSC JSON?
+
+Before filling any selector, fetch the listing page with `curl` and look
+at the raw HTML (learned from a Next.js site fork):
+
+- Items in HTML `<div>` blocks → the bundled HTML scraper works.
+- No cards in HTML, but a 1 MB+ page full of `self.__next_f` payloads
+  (React Server Components flight data) → the catalogue lives in JSON.
+  The bundled scraper cannot read that; a fork may add a JSON mode
+  (bracket-match the rail's `"items":[...]` array, parse with
+  `org.json.JSONArray`). Propose upstreaming it as a general
+  `ITEM_FORMAT` mode rather than keeping fork code.
+
+**Unescape order (the trick):** RSC payloads encode backslash *and*
+quote (`\\\""`). Decode as `\\` → NUL, `\"` → `"`, NUL → `\`.
+Decoding `\"` first leaves a stray backslash that re-escapes the next
+quote and corrupts the JSON (mid-array parse errors).
+
+**Verify candidate routes with a real HTTP request** before trusting
+them: JSON fields named `homepage` (e.g. Netflix `/title/<id>` ids) and
+studio links routinely look like site routes but 404. `sitemap.xml`
+is a better source of truth.
+
 ## Step 1 — Fix identity and origin
 
 1. `DISPLAY_NAME` -> the site's public name.
@@ -65,7 +95,16 @@ matching anchors (empty grid is handled).
 
 ## Step 5 — Fill the player
 
-Open the item/player page in a desktop browser and inspect:
+Open the item/player page in a desktop browser and inspect. **Prefer
+live DOM inspection** (element class chains on the target) over reading
+minified JS chunks — for generated-class (Tailwind) sites the most
+specific *stable class combination* is usually the best hook, and
+labels that change per state (`Play` / `Resume` / `Play in 4K`) are not.
+
+Also check what the site does to `window.open` / first click (ad
+scripts commonly wrap it) before assuming popups are off — the
+harness stubs `window.open`/`alert`/`confirm`, and that is load-bearing
+on sites with popup hijackers.
 
 - `PLAYER_HIDE_CSS` — selectors for header/footer/sidebar/comments/ads.
   Everything hidden is rebuilt by the harness's own OSD.
@@ -97,7 +136,10 @@ a local hack.
 
 | Symptom | Likely cause |
 |---|---|
-| Empty catalogue, no error | Listing page renders items via JS, or `ITEM_CLASS`/`ITEM_LINK_PATH` wrong. Re-check with `curl` raw HTML. |
+| Empty catalogue, no error | Listing page renders items via JS, or `ITEM_CLASS`/`ITEM_LINK_PATH` wrong. Re-check with `curl` raw HTML. If JSON mode needed, see Step 0.5. |
+| Remote OK does nothing on the player | Harness OSD consumes D-pad centre (by design). Drive the site's start button through `PAUSE_TOGGLE_SELECTOR` (for modal-detail sites, point it at the site's Play button). |
+| Details page focuses nothing | SPA renders late: the focus watcher now retries ~4 min and scrolls, but only if `PLAYER_FOCUS_SELECTOR` matches the real Play control. |
+| Player stalls black (no video) | Check the media API response first (desktop browser + `curl`) before blaming the WebView — geo-gated media servers return empty sources per region. |
 | Cards without posters | Poster host missing from `ALLOWED_IMAGE_PREFIXES`, or poster uses `srcset` (unsupported — pick a different `<img>` or extend the scraper; Phase 4). |
 | Player shows site chrome | `PLAYER_KEEP_SELECTORS`/`PLAYER_HIDE_CSS` incomplete. |
 | Video does not play | Missing media host in `FIRST_PARTY_HOSTS`, or `PLAYER_FRAME_SELECTOR` empty/wrong so the video sits at 0×0. |
