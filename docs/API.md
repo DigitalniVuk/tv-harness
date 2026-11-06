@@ -57,6 +57,20 @@ media playback without user gesture. First-party hosts in
 `AdBlocker` (media file extensions such as `.m3u8`, `.mp4`, `.mpd`,
 `.ts`, `.vtt`, … always pass).
 
+**Cross-origin-embed pattern (proposed generic mode, proven in a site
+fork):** when the site plays video in a cross-origin iframe, page JS
+cannot drive its controls. The harness reads `iframe.src` (always
+allowed), loads that URL directly in the WebView, and then runs a
+watchdog: while the video makes no progress and the player's own
+"try another" control is offered, click it (cycle server, bounded,
+with toasts); when playback starts muted, click the volume control
+once. The proposed config surface is `DIRECT_EMBED_HOST` /
+`EMBED_IFRAME_HOST`, `EMBED_PLAY_SELECTOR`, `STALL_FALLBACK_SELECTOR` +
+`STALL_TIMEOUT_MS`/`STALL_RETRY_MS`/`STALL_MAX_CLICKS`, and
+`SOUND_CONTROL_SELECTOR`. Until upstreamed, implement all of this in
+the site fork only and backport the generic parts (see the playbook in
+`docs/AGENT_GUIDE.md`).
+
 ## 2. Java API (internal, site-agnostic)
 
 Signature overview. Anything not listed here does not exist.
@@ -113,7 +127,11 @@ those three ids exactly; other ids are free.
 
 `WatchActivity` drives the site's player only through these operations.
 Selectors come from `SiteConfig` (shown in `<>`). An empty selector means
-"that control is disabled".
+"that control is disabled" (the OSD toast explains; the Episodes button
+hides — the harness implements this).
+Note: the harness OSD consumes D-pad centre. To start a site's own Play
+button, point `PAUSE_TOGGLE_SELECTOR` at that button and use the OSD's
+PAUSE / PLAY button (a common pattern for modal-detail sites).
 
 | Operation | JS performed |
 |---|---|

@@ -23,11 +23,18 @@ degrades or must be removed from `SiteConfig`.
   SPA detail pages often render their player only after a client-side
   data fetch (tens of seconds on slow TVs): the harness focus watcher
   retries for ~4 minutes, and your `PLAYER_FOCUS_SELECTOR` must match
-  the real start control. A third-party embed iframe is fine, but a
-  media server that geo-gates sources per network will not play anywhere off that network — verify the media API, not the WebView. The
-  site's player must be reachable from `document.querySelector` (see the
-  selector contract in `docs/API.md`) and, for pause/resume, must listen
-  to the Space key or expose a clickable pause control.
+  the real start control. A third-party embed iframe is fine — but note
+  that page JS **cannot** click inside a cross-origin iframe, so sites
+  that embed must either be navigated to directly (the proposed
+  direct-embed mode in `docs/HARNESS_PLAN.md`) or driven purely by
+  document-level key events. The site's player must be reachable from
+  `document.querySelector` (see the selector contract in `docs/API.md`)
+  and, for pause/resume, must listen to the Space key or expose a
+  clickable pause control. A third-party embed also typically starts
+  muted (autoplay policy) — a harness unmute click or OSD button is
+  needed (see `API.md`). A media server that geo-gates sources per
+  network will not play anywhere off that network — verify the media
+  API, not the WebView.
 - **Episode/section anchors (optional).** Sites with a section picker need
   anchors matching `EPISODE_LIST_SELECTOR`/`EPISODE_ACTIVE_SELECTOR` with
   the episode number in `EPISODE_NUM_ATTR` or as anchor text. Sites with

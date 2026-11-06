@@ -76,7 +76,9 @@ the installed app and its data.
 - `AndroidManifest.xml`, `res/` — app manifest and resources.
 - `build.sh` — compiles, aligns, and signs the APK.
 - `docs/HARNESS_PLAN.md` — conversion plan, phases, and status.
-- `docs/AGENT_GUIDE.md` — step-by-step playbook for plugging in a website.
+- `docs/AGENT_GUIDE.md` — step-by-step playbook for plugging in a
+  website, including the field-notes playbook (RSC traps, direct-embed
+  pattern, watchdog, sound, geo-gate checklist).
 - `docs/API.md` — documented endpoints and internal contracts.
 - `docs/REQUIREMENTS.md` — what a target website must provide.
 - `docs/ARCHITECTURE.md`, `docs/BUILDING.md` — flow and build notes.

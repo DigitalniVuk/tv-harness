@@ -110,6 +110,17 @@ code to do it. Upstream candidates (in priority order):
   not remote-controllable today (fork left them a limitation). A
   `CONTROL_SELECTOR` + `CONTROL_VALUE` hook would let configs drive
   `<select>` pickers without fork code.
+- **Direct-embed navigation + stuck-media watchdog.** Cross-origin
+  embed iframes block *all* page-JS control of the player (Play, server
+  switch, mute). The fork solved it: read `iframe.src` (allowed
+  cross-origin) and load that URL directly in the WebView, then poll
+  video progress — while stuck, click the player's own "try another"
+  control (bounded, with toasts); auto-unmute once playing. As generic
+  harness code this is: `DIRECT_EMBED_HOST`/`EMBED_IFRAME_HOST`
+  navigation, `EMBED_PLAY_SELECTOR`, `STALL_FALLBACK_SELECTOR` +
+  `STALL_TIMEOUT_MS`/`STALL_RETRY_MS`/`STALL_MAX_CLICKS`, and
+  `SOUND_CONTROL_SELECTOR`. Proven on a Fire TV (video + server
+  cycling live); audio state is only probe-verifiable, not visible.
 - **Tab-bar overflow fix.** Six tabs + REFRESH squeeze the brand label
   to zero width; make the tab row horizontally scrollable or shrink
   tabs with the count in `CatalogActivity`.
@@ -149,5 +160,10 @@ code to do it. Upstream candidates (in priority order):
       catalogue, modal player, Fire TV verified; see that fork's
       `docs/INVESTIGATION.md` + `docs/ISSUES.md`
 - [x] Backport of generic fixes: empty-selector guards, focus watcher
-      window (~4 min + scrollIntoView), episode-button hiding (this commit)
-- [ ] Phase 4 upstream tasks above (RSC JSON mode, control seam, tab-row)
+      window (~4 min + scrollIntoView), episode-button hiding
+- [x] Direct-embed + stuck-media watchdog proven in the fork
+      (config-driven, needs upstreaming as generic code)
+- [x] Field-notes playbook in `AGENT_GUIDE.md` (RSC traps, direct-embed
+      pattern, watchdog, sound, geo-gate checklist, fork discipline)
+- [ ] Phase 4 upstream tasks above (RSC JSON mode, direct-embed generic
+      code, control seam, tab-row)
