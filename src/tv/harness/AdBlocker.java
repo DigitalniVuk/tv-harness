@@ -64,13 +64,18 @@ final class AdBlocker {
     }
 
     private static Set<String> loadDomains() {
-        Set<String> out = new HashSet<>();
+        // Performance optimization: Pre-allocate initial capacity for ~47,500 entries in
+        // assets/blocking-domains.txt. With default load factor of 0.75, capacity 65536
+        // holds up to 49152 entries without table resizing and rehashing (saving ~12 resize cycles).
+        // Larger 32KB buffer reduces I/O read calls.
+        Set<String> out = new HashSet<>(65536);
         try (InputStream stream = App.context().getAssets().open("blocking-domains.txt");
-             BufferedReader reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"))) {
+             BufferedReader reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"), 32768)) {
             String line;
             while ((line = reader.readLine()) != null) {
+                if (line.isEmpty() || line.charAt(0) == '#') continue;
                 line = line.trim().toLowerCase(Locale.ROOT);
-                if (!line.isEmpty() && !line.startsWith("#")) out.add(line);
+                if (!line.isEmpty() && line.charAt(0) != '#') out.add(line);
             }
         } catch (Exception ignored) {
             // The targeted rules below still block common pop-up ad paths if the list is absent.
