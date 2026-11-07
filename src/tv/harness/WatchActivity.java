@@ -127,10 +127,10 @@ public final class WatchActivity extends Activity {
         topBar.addView(title, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         if (!SiteConfig.EPISODE_LIST_SELECTOR.isEmpty()) {
-            topBar.addView(action("EPISODES", this::toggleEpisodeSheet), headerButtonParams());
+            topBar.addView(action("EPISODES", "Episodes", this::toggleEpisodeSheet), headerButtonParams());
         }
-        topBar.addView(action("RELOAD", () -> web.reload()), headerButtonParams());
-        topBar.addView(action("BROWSE", this::finish), headerButtonParams());
+        topBar.addView(action("RELOAD", "Reload player", () -> web.reload()), headerButtonParams());
+        topBar.addView(action("BROWSE", "Browse catalogue", this::finish), headerButtonParams());
         toolbar.addView(topBar, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -159,7 +159,7 @@ public final class WatchActivity extends Activity {
         episodeSheetTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         sheetHeader.addView(episodeSheetTitle, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        sheetHeader.addView(action("CLOSE ✕", this::toggleEpisodeSheet), headerButtonParams());
+        sheetHeader.addView(action("CLOSE ✕", "Close episodes", this::toggleEpisodeSheet), headerButtonParams());
         episodeSheet.addView(sheetHeader, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -187,13 +187,13 @@ public final class WatchActivity extends Activity {
         controls.setPadding(dp(16), dp(10), dp(16), dp(12));
         controls.setBackground(bottomScrimDrawable());
 
-        controls.addView(square("Ⅱ\nPAUSE / PLAY", this::togglePause), controlParams());
-        controls.addView(square("◀\nPREV", () -> pageClick(SiteConfig.PREV_EPISODE_SELECTOR)), controlParams());
-        controls.addView(square("▶\nNEXT", () -> pageClick(SiteConfig.NEXT_EPISODE_SELECTOR)), controlParams());
+        controls.addView(square("Ⅱ\nPAUSE / PLAY", "Pause or play", this::togglePause), controlParams());
+        controls.addView(square("◀\nPREV", "Previous episode", () -> pageClick(SiteConfig.PREV_EPISODE_SELECTOR)), controlParams());
+        controls.addView(square("▶\nNEXT", "Next episode", () -> pageClick(SiteConfig.NEXT_EPISODE_SELECTOR)), controlParams());
         if (!SiteConfig.EPISODE_LIST_SELECTOR.isEmpty()) {
-            controls.addView(square("≡\nEPISODES", this::toggleEpisodeSheet), controlParams());
+            controls.addView(square("≡\nEPISODES", "Episodes list", this::toggleEpisodeSheet), controlParams());
         }
-        autoplayButton = square("AUTO PLAY\n…", this::toggleAutoplay);
+        autoplayButton = square("AUTO PLAY\n…", "Toggle autoplay", this::toggleAutoplay);
         controls.addView(autoplayButton, controlParams());
 
         rootOverlay.addView(controls, new FrameLayout.LayoutParams(
@@ -236,17 +236,18 @@ public final class WatchActivity extends Activity {
         return p;
     }
 
-    private TextView square(String label, Runnable run) {
-        TextView button = action(label, run);
+    private TextView square(String label, String description, Runnable run) {
+        TextView button = action(label, description, run);
         button.setTextSize(13);
         button.setMaxLines(2);
         button.setId(View.generateViewId());
         return button;
     }
 
-    private TextView action(String label, Runnable run) {
+    private TextView action(String label, String description, Runnable run) {
         TextView button = new TextView(this);
         button.setText(label);
+        button.setContentDescription(description);
         button.setTextColor(Color.WHITE);
         button.setTextSize(13);
         button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
@@ -406,6 +407,8 @@ public final class WatchActivity extends Activity {
             TextView btn = new TextView(this);
             btn.setText("EP " + num);
             btn.setTag(num);
+            String desc = (ep.name != null && !ep.name.isEmpty()) ? ep.name : ("Episode " + num);
+            btn.setContentDescription(desc + (isCurrent ? ", currently playing" : ""));
             btn.setTextColor(Color.WHITE);
             btn.setTextSize(13);
             btn.setTypeface(Typeface.DEFAULT, isCurrent ? Typeface.BOLD : Typeface.NORMAL);
@@ -613,8 +616,10 @@ public final class WatchActivity extends Activity {
                 + "e.getAttribute('data-value')==='1'||e.getAttribute('aria-checked')==='true'));})()",
                 value -> {
                     autoplayOn = "true".equals(value);
-                    if (autoplayButton != null) autoplayButton.setText(
-                            "AUTO PLAY\n" + (autoplayOn ? "ON ✓" : "OFF"));
+                    if (autoplayButton != null) {
+                        autoplayButton.setText("AUTO PLAY\n" + (autoplayOn ? "ON ✓" : "OFF"));
+                        autoplayButton.setContentDescription("Autoplay, currently " + (autoplayOn ? "enabled" : "disabled"));
+                    }
                 });
     }
 
