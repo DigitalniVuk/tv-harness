@@ -17,6 +17,7 @@ import android.view.WindowManager;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -174,8 +175,7 @@ public final class CatalogActivity extends Activity {
         mode = "home";
         activeCategory = null;
         images.evictAll();
-        status.setText("Loading listings…");
-        content.removeAllViews();
+        showLoading("Loading listings…");
         network.execute(() -> {
             java.util.Map<String, List<CatalogItem>> fetched = new java.util.LinkedHashMap<>();
             List<CatalogCategory> genreList = Collections.emptyList();
@@ -436,8 +436,7 @@ public final class CatalogActivity extends Activity {
         final int request = ++generation;
         mode = "category";
         activeCategory = genre.title;
-        status.setText("Loading " + genre.title + "…");
-        content.removeAllViews();
+        showLoading("Loading " + genre.title + "…");
         network.execute(() -> {
             List<CatalogItem> items;
             String error = null;
@@ -486,6 +485,29 @@ public final class CatalogActivity extends Activity {
         network.shutdownNow();
         imageWorkers.shutdownNow();
         super.onDestroy();
+    }
+
+    private void showLoading(String message) {
+        status.setText(message);
+        content.removeAllViews();
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        box.setPadding(dp(32), dp(80), dp(32), dp(80));
+
+        ProgressBar spinner = new ProgressBar(this);
+        spinner.setIndeterminate(true);
+        spinner.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(ACCENT));
+        spinner.setContentDescription(message);
+        box.addView(spinner, new LinearLayout.LayoutParams(dp(48), dp(48)));
+
+        TextView label = text(message, 16, MUTED, false);
+        label.setGravity(Gravity.CENTER);
+        label.setPadding(0, dp(16), 0, 0);
+        box.addView(label);
+
+        content.addView(box, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     private void addEmptyState() {
