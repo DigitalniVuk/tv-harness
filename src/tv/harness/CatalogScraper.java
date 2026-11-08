@@ -14,6 +14,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.GZIPInputStream;
 
 /**
  * Fetches only the site's HTML catalogue pages; it never runs the site's
@@ -31,6 +32,19 @@ final class CatalogScraper {
     private static final Pattern ITEM_TYPE = compile(SiteConfig.ITEM_TYPE_REGEX);
     private static final Pattern ITEM_RATING = compile(SiteConfig.ITEM_RATING_REGEX);
     private static final Pattern ITEM_EPISODES = compile(SiteConfig.ITEM_EPISODES_REGEX);
+    // Performance optimization: Pre-split title class tokens once during class initialization
+    // instead of executing regex-based String.split() for every anchor on every catalog item.
+    private static final String[] ITEM_TITLE_TOKENS = parseTitleTokens(SiteConfig.ITEM_TITLE_CLASSES);
+
+    private static String[] parseTitleTokens(String classList) {
+        if (classList == null || classList.isEmpty()) return new String[0];
+        String[] parts = classList.split(",");
+        String[] tokens = new String[parts.length];
+        for (int i = 0; i < parts.length; i++) {
+            tokens[i] = parts[i].trim();
+        }
+        return tokens;
+    }
 
     private static Pattern compile(String regex) {
         return regex == null || regex.isEmpty() ? null : Pattern.compile(regex);
@@ -85,18 +99,24 @@ final class CatalogScraper {
         connection.setRequestProperty("User-Agent", SiteConfig.USER_AGENT);
         connection.setRequestProperty("Accept", "text/html,application/xhtml+xml");
         connection.setRequestProperty("Accept-Language", "en-US,en;q=0.8");
-        connection.setRequestProperty("Accept-Encoding", "identity");
+        // Performance optimization: Request gzip compression to reduce network payload by ~70-85%.
+        connection.setRequestProperty("Accept-Encoding", "gzip, deflate");
         connection.setRequestProperty("Referer", SiteConfig.BASE_URL + SiteConfig.HOME_PATH);
         connection.setRequestProperty("Cache-Control", "no-cache, no-store, max-age=0, must-revalidate");
         connection.setRequestProperty("Pragma", "no-cache");
         try {
             int code = connection.getResponseCode();
             if (code < 200 || code >= 300) throw new Exception("Site returned HTTP " + code);
-            try (InputStream in = connection.getInputStream();
+            String encoding = connection.getContentEncoding();
+            InputStream rawIn = connection.getInputStream();
+            InputStream in = ("gzip".equalsIgnoreCase(encoding))
+                    ? new GZIPInputStream(rawIn)
+                    : rawIn;
+            try (InputStream stream = in;
                  ByteArrayOutputStream out = new ByteArrayOutputStream()) {
                 byte[] buffer = new byte[8192];
                 int count;
-                while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+                while ((count = stream.read(buffer)) != -1) out.write(buffer, 0, count);
                 return new String(out.toByteArray(), Charset.forName("UTF-8"));
             }
         } finally {
@@ -170,8 +190,8 @@ final class CatalogScraper {
     }
 
     private static boolean hasTitleClass(String classes) {
-        for (String token : SiteConfig.ITEM_TITLE_CLASSES.split(",")) {
-            if (classes.contains(token.trim())) return true;
+        for (String token : ITEM_TITLE_TOKENS) {
+            if (!token.isEmpty() && classes.contains(token)) return true;
         }
         return false;
     }
