@@ -317,6 +317,9 @@ public final class WatchActivity extends Activity {
             showOsd();
             hideHandler.removeCallbacks(hideControlsRunnable);
             episodeSheet.setVisibility(View.VISIBLE);
+            if (loadedEpisodes.isEmpty()) {
+                populateEpisodeUi();
+            }
             fetchEpisodesFromPage();
             if (episodeListContainer.getChildCount() > 0) {
                 focusCurrentEpisodeOrFirst();
@@ -389,11 +392,21 @@ public final class WatchActivity extends Activity {
     private void populateEpisodeUi() {
         episodeListContainer.removeAllViews();
         if (loadedEpisodes.isEmpty()) {
+            ProgressBar spinner = new ProgressBar(this);
+            spinner.setIndeterminate(true);
+            spinner.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(ACCENT));
+            spinner.setContentDescription("Loading episodes…");
+            LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(dp(24), dp(24));
+            sp.gravity = Gravity.CENTER_VERTICAL;
+            sp.rightMargin = dp(10);
+            sp.leftMargin = dp(4);
+            episodeListContainer.addView(spinner, sp);
+
             TextView empty = new TextView(this);
-            empty.setText("Episodes are still loading from source...");
+            empty.setText("Loading episodes from source…");
             empty.setTextColor(Color.rgb(180, 185, 200));
             empty.setTextSize(14);
-            empty.setPadding(dp(10), dp(10), dp(10), dp(10));
+            empty.setGravity(Gravity.CENTER_VERTICAL);
             episodeListContainer.addView(empty);
             return;
         }
