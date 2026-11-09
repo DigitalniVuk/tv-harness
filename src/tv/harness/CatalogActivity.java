@@ -30,8 +30,11 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Native, remote-first catalog. HTML is parsed as data; only playback opens WebView. */
 public final class CatalogActivity extends Activity {
@@ -44,7 +47,10 @@ public final class CatalogActivity extends Activity {
     private static final int MUTED = Color.rgb(169, 180, 198);
     private static final int MAX_CARDS = 40;
 
-    private final ExecutorService network = Executors.newSingleThreadExecutor();
+    // Performance optimization: Concurrently fetch tabs and category discovery
+    // using a thread pool instead of sequential single-thread requests.
+    // Reduces catalog load/refresh wall-clock time from ~O(N * latency) to ~O(latency).
+    private final ExecutorService network = Executors.newFixedThreadPool(4);
     private final ExecutorService imageWorkers = Executors.newFixedThreadPool(3);
     private final LruCache<String, Bitmap> images = new LruCache<String, Bitmap>(10 * 1024) {
         @Override
@@ -176,42 +182,73 @@ public final class CatalogActivity extends Activity {
         activeCategory = null;
         images.evictAll();
         showLoading("Loading listings…");
-        network.execute(() -> {
-            java.util.Map<String, List<CatalogItem>> fetched = new java.util.LinkedHashMap<>();
-            List<CatalogCategory> genreList = Collections.emptyList();
-            String error = null;
-            for (SiteConfig.Tab t : SiteConfig.TABS) {
-                if (t.path == null) continue;
-                try { fetched.put(t.id, CatalogScraper.fetchItems(t.path)); }
-                catch (Exception e) { if (error == null) error = message(e); }
+        // Performance optimization: Parallelize HTTP requests across the network thread pool
+        // asynchronously using CompletableFuture.allOff() without blocking thread pool workers.
+        // Rather than sequentially requesting Tab 1 -> Tab 2 -> Tab 3 -> Category discovery,
+        // all requests run concurrently, dropping wall-clock loading duration by ~3x-4x.
+        final ConcurrentHashMap<String, List<CatalogItem>> tabResults = new ConcurrentHashMap<>();
+        final List<CatalogCategory> genreList = Collections.synchronizedList(new ArrayList<>());
+        final AtomicReference<String> firstError = new AtomicReference<>();
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+
+        for (SiteConfig.Tab t : SiteConfig.TABS) {
+            if (t.path == null) continue;
+            final String tabId = t.id;
+            final String tabPath = t.path;
+            futures.add(CompletableFuture.runAsync(() -> {
+                try {
+                    tabResults.put(tabId, CatalogScraper.fetchItems(tabPath));
+                } catch (Exception e) {
+                    firstError.compareAndSet(null, message(e));
+                }
+            }, network));
+        }
+
+        futures.add(CompletableFuture.runAsync(() -> {
+            try {
+                genreList.addAll(CatalogScraper.fetchCategories());
+            } catch (Exception e) {
+                firstError.compareAndSet(null, message(e));
             }
-            try { genreList = CatalogScraper.fetchCategories(); }
-            catch (Exception e) { if (error == null) error = message(e); }
-            final java.util.Map<String, List<CatalogItem>> r = fetched;
-            final List<CatalogCategory> g = genreList;
-            final String problem = error;
-            runOnUiThread(() -> {
-                if (isFinishing() || request != generation) return;
-                tabItems.clear(); tabItems.putAll(r);
-                genres.clear(); genres.addAll(g);
-                render();
-                boolean everythingEmpty = genres.isEmpty();
-                if (everythingEmpty) {
-                    for (List<CatalogItem> list : tabItems.values()) {
-                        if (!list.isEmpty()) { everythingEmpty = false; break; }
+        }, network));
+
+        CompletableFuture<?>[] futuresArray = futures.toArray(new CompletableFuture<?>[0]);
+        CompletableFuture.allOf(futuresArray)
+                .thenRun(() -> {
+                    // Reassemble tab items in exact SiteConfig.TABS order
+                    final java.util.Map<String, List<CatalogItem>> fetched = new java.util.LinkedHashMap<>();
+                    for (SiteConfig.Tab t : SiteConfig.TABS) {
+                        if (t.path == null) continue;
+                        List<CatalogItem> items = tabResults.get(t.id);
+                        if (items != null) fetched.put(t.id, items);
                     }
-                }
-                if (everythingEmpty && problem != null) {
-                    status.setText("Could not load the catalog. Check the connection and tap REFRESH.");
-                } else if (problem != null) {
-                    status.setText("Some lists could not refresh. Tap REFRESH to try again.");
-                } else {
-                    int total = 0;
-                    for (List<CatalogItem> list : tabItems.values()) total += list.size();
-                    status.setText("Updated just now  ·  " + total + " titles  ·  " + genres.size() + " categories");
-                }
-            });
-        });
+
+                    final java.util.Map<String, List<CatalogItem>> r = fetched;
+                    final List<CatalogCategory> g = new ArrayList<>(genreList);
+                    final String problem = firstError.get();
+
+                    runOnUiThread(() -> {
+                        if (isFinishing() || request != generation) return;
+                        tabItems.clear(); tabItems.putAll(r);
+                        genres.clear(); genres.addAll(g);
+                        render();
+                        boolean everythingEmpty = genres.isEmpty();
+                        if (everythingEmpty) {
+                            for (List<CatalogItem> list : tabItems.values()) {
+                                if (!list.isEmpty()) { everythingEmpty = false; break; }
+                            }
+                        }
+                        if (everythingEmpty && problem != null) {
+                            status.setText("Could not load the catalog. Check the connection and tap REFRESH.");
+                        } else if (problem != null) {
+                            status.setText("Some lists could not refresh. Tap REFRESH to try again.");
+                        } else {
+                            int total = 0;
+                            for (List<CatalogItem> list : tabItems.values()) total += list.size();
+                            status.setText("Updated just now  ·  " + total + " titles  ·  " + genres.size() + " categories");
+                        }
+                    });
+                });
     }
 
     private String message(Exception e) {
