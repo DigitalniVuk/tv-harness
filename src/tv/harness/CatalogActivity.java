@@ -99,12 +99,15 @@ public final class CatalogActivity extends Activity {
         for (SiteConfig.Tab t : SiteConfig.TABS) {
             top.addView(tab(t.label, t.id, () -> { mode = t.id; render(); }), tabParams());
         }
-        top.addView(tab("REFRESH", null, this::loadCatalog), tabParams());
+        TextView refreshBtn = tab("REFRESH", null, this::loadCatalog);
+        refreshBtn.setContentDescription("Refresh catalogue listings");
+        top.addView(refreshBtn, tabParams());
         root.addView(top, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(76)));
 
         status = text("Loading…", 16, MUTED, false);
         status.setPadding(dp(32), dp(12), dp(32), dp(8));
+        status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         root.addView(status, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(46)));
 
