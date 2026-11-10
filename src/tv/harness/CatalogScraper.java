@@ -32,6 +32,9 @@ final class CatalogScraper {
     private static final Pattern ITEM_TYPE = compile(SiteConfig.ITEM_TYPE_REGEX);
     private static final Pattern ITEM_RATING = compile(SiteConfig.ITEM_RATING_REGEX);
     private static final Pattern ITEM_EPISODES = compile(SiteConfig.ITEM_EPISODES_REGEX);
+    // Performance optimization: Pre-compile whitespace pattern once to avoid recompiling
+    // the regex on every plainText() call for each card title, type, rating, and episode count.
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     // Performance optimization: Pre-split title class tokens once during class initialization
     // instead of executing regex-based String.split() for every anchor on every catalog item.
     private static final String[] ITEM_TITLE_TOKENS = parseTitleTokens(SiteConfig.ITEM_TITLE_CLASSES);
@@ -215,6 +218,6 @@ final class CatalogScraper {
 
     private static String plainText(String html) {
         String text = Html.fromHtml(html, Html.FROM_HTML_MODE_LEGACY).toString();
-        return text.replace('\u00a0', ' ').replaceAll("\\s+", " ").trim();
+        return WHITESPACE.matcher(text.replace('\u00a0', ' ')).replaceAll(" ").trim();
     }
 }
