@@ -1,5 +1,9 @@
 # Palette's Journal - Critical Learnings Only
 
+## 2026-11-11 - Interactive Focus Scale and Accessible Context for 10-Foot Grid Buttons
+**Learning:** In 10-foot TV interfaces navigated via D-pad remotes from a distance, flat text buttons in dense discovery grids (such as genre/category grids) are hard to distinguish without depth-based focus scaling, and screen readers read isolated label tokens without context on the interaction outcome.
+**Action:** Pair subtle scale transitions (`scaleX`/`scaleY` on focus) with explicit contextual `contentDescription` attributes ("Category: [title], browse titles") to give remote users both instant visual depth feedback and screen-reader clarity.
+
 ## 2026-11-10 - Dynamic Status Announcements in 10-Foot TV UIs
 **Learning:** In 10-foot TV interfaces where navigation focus resides within remote-controlled grids or action bars, status subheadings that dynamically update (such as catalog loading progress, category changes, or error states) are invisible to screen readers unless configured with an accessibility live region.
 **Action:** Configure dynamic persistent status indicators with `setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE)` so assistive technologies announce loading transitions and error notices without hijacking user focus.
