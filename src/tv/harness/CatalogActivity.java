@@ -467,6 +467,10 @@ public final class CatalogActivity extends Activity {
         TextView button = text(genre.title, 15, WHITE, true);
         button.setGravity(Gravity.CENTER);
         button.setFocusable(true);
+        button.setContentDescription("Category: " + genre.title + ", browse titles");
+        button.setOnFocusChangeListener((v, focused) ->
+                v.animate().scaleX(focused ? 1.05f : 1f).scaleY(focused ? 1.05f : 1f)
+                        .setDuration(110).start());
         button.setOnClickListener(v -> loadGenre(genre));
         button.setBackground(buttonBackground(CARD, ACCENT));
         return button;
