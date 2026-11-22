@@ -1,6 +1,7 @@
 package tv.harness;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -14,13 +15,14 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.view.inputmethod.EditorInfo;
+import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import android.widget.Toast;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -36,7 +38,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** Native, remote-first catalog. HTML is parsed as data; only playback opens WebView. */
+/** Native, remote-first catalog. HTML/JSON is parsed as data; only playback opens WebView. */
 public final class CatalogActivity extends Activity {
     private static final int BG = Color.rgb(10, 12, 18);
     private static final int PANEL = Color.rgb(20, 25, 36);
@@ -47,21 +49,18 @@ public final class CatalogActivity extends Activity {
     private static final int MUTED = Color.rgb(169, 180, 198);
     private static final int MAX_CARDS = 40;
 
-    // Performance optimization: Concurrently fetch tabs and category discovery
-    // using a thread pool instead of sequential single-thread requests.
-    // Reduces catalog load/refresh wall-clock time from ~O(N * latency) to ~O(latency).
     private final ExecutorService network = Executors.newFixedThreadPool(4);
-    private final ExecutorService imageWorkers = Executors.newFixedThreadPool(3);
-    private final LruCache<String, Bitmap> images = new LruCache<String, Bitmap>(10 * 1024) {
+    private final ExecutorService imageWorkers = Executors.newFixedThreadPool(4);
+    private final LruCache<String, Bitmap> images = new LruCache<String, Bitmap>(16 * 1024) {
         @Override
         protected int sizeOf(String key, Bitmap value) {
             return Math.max(1, value.getByteCount() / 1024);
         }
     };
     private final Set<String> loadingImages = Collections.synchronizedSet(new HashSet<>());
-    // Items keyed by SiteConfig tab id; category grid is fetched separately.
     private final java.util.Map<String, List<CatalogItem>> tabItems = new java.util.LinkedHashMap<>();
     private final List<CatalogItem> categoryItems = new ArrayList<>();
+    private final List<CatalogItem> searchResults = new ArrayList<>();
     private final List<CatalogCategory> genres = new ArrayList<>();
     private LinearLayout content;
     private TextView status;
@@ -69,6 +68,7 @@ public final class CatalogActivity extends Activity {
     private final List<TextView> navTabs = new ArrayList<>();
     private String mode = "home";
     private String activeCategory;
+    private String lastQuery = "";
     private int generation;
 
     @Override
@@ -90,26 +90,48 @@ public final class CatalogActivity extends Activity {
         top.setGravity(Gravity.CENTER_VERTICAL);
         top.setPadding(dp(28), dp(8), dp(28), dp(8));
         top.setBackgroundColor(PANEL);
+
         TextView brand = new TextView(this);
         brand.setText(SiteConfig.DISPLAY_NAME);
         brand.setTextColor(WHITE);
-        brand.setTextSize(25);
+        brand.setTextSize(24);
         brand.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        top.addView(brand, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
+        brand.setSingleLine(true);
+        LinearLayout.LayoutParams brandParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        brandParams.rightMargin = dp(20);
+        top.addView(brand, brandParams);
+
+        HorizontalScrollView tabScroll = new HorizontalScrollView(this);
+        tabScroll.setHorizontalScrollBarEnabled(false);
+        tabScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        tabScroll.setFillViewport(true);
+
+        LinearLayout tabRow = new LinearLayout(this);
+        tabRow.setOrientation(LinearLayout.HORIZONTAL);
+        tabRow.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
         for (SiteConfig.Tab t : SiteConfig.TABS) {
-            top.addView(tab(t.label, t.id, () -> { mode = t.id; render(); }), tabParams());
+            tabRow.addView(tab(t.label, t.id, () -> { mode = t.id; render(); }), tabParams());
+        }
+        if (SiteConfig.SEARCH_API_PATH_TEMPLATE != null
+                && !SiteConfig.SEARCH_API_PATH_TEMPLATE.isEmpty()) {
+            tabRow.addView(tab("SEARCH", "search", () -> { mode = "search"; render(); }), tabParams());
         }
         TextView refreshBtn = tab("REFRESH", null, this::loadCatalog);
         refreshBtn.setContentDescription("Refresh catalogue listings");
-        top.addView(refreshBtn, tabParams());
-        root.addView(top, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(76)));
+        tabRow.addView(refreshBtn, tabParams());
 
-        status = text("Loading…", 16, MUTED, false);
-        status.setPadding(dp(32), dp(12), dp(32), dp(8));
+        tabScroll.addView(tabRow, new HorizontalScrollView.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        top.addView(tabScroll, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
+        root.addView(top, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(72)));
+
+        status = text("Loading…", 15, MUTED, false);
+        status.setPadding(dp(30), dp(10), dp(30), dp(6));
         status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         root.addView(status, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(46)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(40)));
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -127,19 +149,23 @@ public final class CatalogActivity extends Activity {
         hint.setGravity(Gravity.CENTER_VERTICAL);
         hint.setPadding(dp(30), 0, dp(30), 0);
         root.addView(hint, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(34)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(32)));
         setContentView(root);
     }
 
     private LinearLayout.LayoutParams tabParams() {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(128), dp(48));
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(44));
         p.leftMargin = dp(8);
         return p;
     }
 
     private TextView tab(String label, String tabMode, Runnable click) {
-        TextView v = text(label, 14, WHITE, true);
+        TextView v = text(label, 13, WHITE, true);
         v.setGravity(Gravity.CENTER);
+        v.setSingleLine(true);
+        v.setMinWidth(dp(78));
+        v.setPadding(dp(16), 0, dp(16), 0);
         v.setFocusable(true);
         v.setOnClickListener(view -> click.run());
         if (tabMode != null) {
@@ -185,10 +211,7 @@ public final class CatalogActivity extends Activity {
         activeCategory = null;
         images.evictAll();
         showLoading("Loading listings…");
-        // Performance optimization: Parallelize HTTP requests across the network thread pool
-        // asynchronously using CompletableFuture.allOff() without blocking thread pool workers.
-        // Rather than sequentially requesting Tab 1 -> Tab 2 -> Tab 3 -> Category discovery,
-        // all requests run concurrently, dropping wall-clock loading duration by ~3x-4x.
+
         final ConcurrentHashMap<String, List<CatalogItem>> tabResults = new ConcurrentHashMap<>();
         final List<CatalogCategory> genreList = Collections.synchronizedList(new ArrayList<>());
         final AtomicReference<String> firstError = new AtomicReference<>();
@@ -198,9 +221,10 @@ public final class CatalogActivity extends Activity {
             if (t.path == null) continue;
             final String tabId = t.id;
             final String tabPath = t.path;
+            final String tabMediaType = t.mediaType;
             futures.add(CompletableFuture.runAsync(() -> {
                 try {
-                    tabResults.put(tabId, CatalogScraper.fetchItems(tabPath));
+                    tabResults.put(tabId, CatalogScraper.fetchItems(tabPath, tabMediaType));
                 } catch (Exception e) {
                     firstError.compareAndSet(null, message(e));
                 }
@@ -218,7 +242,6 @@ public final class CatalogActivity extends Activity {
         CompletableFuture<?>[] futuresArray = futures.toArray(new CompletableFuture<?>[0]);
         CompletableFuture.allOf(futuresArray)
                 .thenRun(() -> {
-                    // Reassemble tab items in exact SiteConfig.TABS order
                     final java.util.Map<String, List<CatalogItem>> fetched = new java.util.LinkedHashMap<>();
                     for (SiteConfig.Tab t : SiteConfig.TABS) {
                         if (t.path == null) continue;
@@ -279,7 +302,10 @@ public final class CatalogActivity extends Activity {
         updateNavTabs();
         content.removeAllViews();
         firstContentFocus = null;
-        if ("genres".equals(mode)) {
+        if ("search".equals(mode)) {
+            status.setText(lastQuery.isEmpty() ? "Search movies and TV shows" : ("Results for \"" + lastQuery + "\""));
+            addSearchUi();
+        } else if ("genres".equals(mode)) {
             status.setText("Choose a category");
             addGenreGrid();
         } else if ("category".equals(mode)) {
@@ -297,7 +323,7 @@ public final class CatalogActivity extends Activity {
                 List<CatalogItem> items = tabItems.get(t.id);
                 if (items != null && !items.isEmpty()) anyItems = true;
             }
-            status.setText(anyItems ? "Choose a title to open its player" : "Loading…");
+            status.setText(anyItems ? "Choose a title to watch" : "Loading…");
             for (SiteConfig.Tab t : SiteConfig.TABS) {
                 List<CatalogItem> items = tabItems.get(t.id);
                 if (items != null) addSection(t.label.toUpperCase(), items);
@@ -306,7 +332,7 @@ public final class CatalogActivity extends Activity {
         }
         if (content.getChildCount() == 0 && "genres".equals(mode)) {
             status.setText("Category list is unavailable. Tap REFRESH to try again.");
-        } else if (content.getChildCount() == 0 && !"genres".equals(mode)) {
+        } else if (content.getChildCount() == 0 && !"genres".equals(mode) && !"search".equals(mode)) {
             addEmptyState();
         }
         View focus = firstContentFocus;
@@ -315,10 +341,89 @@ public final class CatalogActivity extends Activity {
         });
     }
 
+    private void addSearchUi() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(dp(30), dp(8), dp(30), dp(14));
+
+        EditText input = new EditText(this);
+        input.setText(lastQuery);
+        input.setHint("Type movie or show title…");
+        input.setHintTextColor(MUTED);
+        input.setTextColor(WHITE);
+        input.setTextSize(16);
+        input.setSingleLine(true);
+        input.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
+        input.setPadding(dp(16), dp(10), dp(16), dp(10));
+        GradientDrawable inputBg = new GradientDrawable();
+        inputBg.setColor(CARD);
+        inputBg.setCornerRadius(dp(10));
+        inputBg.setStroke(dp(2), ACCENT);
+        input.setBackground(inputBg);
+        input.setOnEditorActionListener((v, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_SEARCH
+                    || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
+                runSearch(input.getText().toString());
+                return true;
+            }
+            return false;
+        });
+
+        LinearLayout.LayoutParams inputLp = new LinearLayout.LayoutParams(dp(440), dp(48));
+        inputLp.rightMargin = dp(12);
+        bar.addView(input, inputLp);
+
+        TextView go = text("SEARCH", 14, WHITE, true);
+        go.setGravity(Gravity.CENTER);
+        go.setFocusable(true);
+        go.setBackground(buttonBackground(Color.rgb(55, 45, 95), ACCENT));
+        go.setOnClickListener(v -> runSearch(input.getText().toString()));
+        bar.addView(go, new LinearLayout.LayoutParams(dp(120), dp(48)));
+
+        content.addView(bar);
+        if (firstContentFocus == null) firstContentFocus = input;
+
+        if (!searchResults.isEmpty()) {
+            addSection("SEARCH RESULTS", searchResults);
+        }
+    }
+
+    private void runSearch(String query) {
+        final String clean = query == null ? "" : query.trim();
+        if (clean.isEmpty()) return;
+        lastQuery = clean;
+        final int request = ++generation;
+        status.setText("Searching for \"" + clean + "\"…");
+        network.execute(() -> {
+            List<CatalogItem> items;
+            String err = null;
+            try {
+                items = CatalogScraper.searchItems(clean);
+            } catch (Exception e) {
+                items = Collections.emptyList();
+                err = message(e);
+            }
+            final List<CatalogItem> found = items;
+            final String problem = err;
+            runOnUiThread(() -> {
+                if (isFinishing() || request != generation) return;
+                searchResults.clear();
+                searchResults.addAll(found);
+                render();
+                if (found.isEmpty()) {
+                    status.setText(problem != null ? "Search failed. Try again." : "No results for \"" + clean + "\"");
+                } else {
+                    status.setText("Found " + found.size() + " titles for \"" + clean + "\"");
+                }
+            });
+        });
+    }
+
     private void addSection(String heading, List<CatalogItem> all) {
         if (all.isEmpty()) return;
-        TextView title = text(heading, 18, WHITE, true);
-        title.setPadding(dp(30), dp(12), dp(30), dp(10));
+        TextView title = text(heading, 17, WHITE, true);
+        title.setPadding(dp(30), dp(10), dp(30), dp(8));
         content.addView(title, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         HorizontalScrollView row = new HorizontalScrollView(this);
@@ -326,25 +431,25 @@ public final class CatalogActivity extends Activity {
         row.setOverScrollMode(View.OVER_SCROLL_NEVER);
         row.setClipChildren(false);
         row.setClipToPadding(false);
-        row.setPadding(dp(26), dp(8), dp(26), dp(14));
+        row.setPadding(dp(26), dp(6), dp(26), dp(12));
         LinearLayout cards = new LinearLayout(this);
         cards.setOrientation(LinearLayout.HORIZONTAL);
         cards.setClipChildren(false);
         cards.setClipToPadding(false);
         int count = Math.min(MAX_CARDS, all.size());
         for (int i = 0; i < count; i++) {
-            View tile = card(all.get(i), i < 6);
+            View tile = card(all.get(i), i < 8);
             if (firstContentFocus == null) firstContentFocus = tile;
             cards.addView(tile, cardParams());
         }
         row.addView(cards, new HorizontalScrollView.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         content.addView(row, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(354)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(348)));
     }
 
     private LinearLayout.LayoutParams cardParams() {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(198), dp(330));
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(194), dp(324));
         p.rightMargin = dp(14);
         return p;
     }
@@ -360,27 +465,27 @@ public final class CatalogActivity extends Activity {
         poster.setBackgroundColor(Color.rgb(38, 44, 58));
         poster.setTag(item.posterUrl);
         card.addView(poster, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(250)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(246)));
         card.setOnFocusChangeListener((v, focused) -> {
             v.animate().scaleX(focused ? 1.04f : 1f).scaleY(focused ? 1.04f : 1f)
                     .setDuration(110).start();
             if (focused) loadPoster(item.posterUrl, poster);
         });
         card.setOnClickListener(v -> open(item));
-        TextView name = text(item.title, 15, WHITE, true);
+        TextView name = text(item.title, 14, WHITE, true);
         name.setMaxLines(2);
         name.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        name.setPadding(dp(12), dp(10), dp(12), 0);
+        name.setPadding(dp(10), dp(8), dp(10), 0);
         card.addView(name, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
-        TextView meta = text(item.details, 12, MUTED, false);
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(46)));
+        TextView meta = text(item.details, 11, MUTED, false);
         meta.setMaxLines(1);
         meta.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        meta.setPadding(dp(12), dp(4), dp(12), dp(6));
+        meta.setPadding(dp(10), dp(2), dp(10), dp(6));
         card.addView(meta, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(26)));
         if (preload) loadPoster(item.posterUrl, poster);
-        card.setContentDescription(item.title + ", " + item.details + ", play");
+        card.setContentDescription(item.title + ", " + item.details);
         return card;
     }
 
@@ -405,12 +510,10 @@ public final class CatalogActivity extends Activity {
                 connection.setConnectTimeout(9000);
                 connection.setReadTimeout(12000);
                 connection.setInstanceFollowRedirects(true);
-                connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Android TV)");
-                connection.setRequestProperty("Cache-Control", "no-cache, no-store, max-age=0, must-revalidate");
-                connection.setRequestProperty("Pragma", "no-cache");
+                connection.setRequestProperty("User-Agent", SiteConfig.USER_AGENT);
                 try (InputStream in = connection.getInputStream()) {
                     BitmapFactory.Options options = new BitmapFactory.Options();
-                    options.inSampleSize = 2;
+                    options.inSampleSize = 1;
                     Bitmap bitmap = BitmapFactory.decodeStream(in, null, options);
                     if (bitmap != null) {
                         images.put(url, bitmap);
@@ -429,16 +532,19 @@ public final class CatalogActivity extends Activity {
 
     private void addGenreStrip() {
         if (genres.isEmpty()) return;
-        TextView heading = text("BROWSE BY CATEGORY", 18, WHITE, true);
-        heading.setPadding(dp(30), dp(14), dp(30), dp(10));
+        TextView heading = text("BROWSE BY CATEGORY", 17, WHITE, true);
+        heading.setPadding(dp(30), dp(14), dp(30), dp(8));
         content.addView(heading);
+        HorizontalScrollView scroll = new HorizontalScrollView(this);
+        scroll.setHorizontalScrollBarEnabled(false);
         LinearLayout row = new LinearLayout(this);
         row.setPadding(dp(26), dp(4), dp(26), dp(12));
         row.setOrientation(LinearLayout.HORIZONTAL);
-        for (int i = 0; i < Math.min(8, genres.size()); i++) {
+        for (int i = 0; i < Math.min(12, genres.size()); i++) {
             row.addView(genreButton(genres.get(i)), genreParams());
         }
-        content.addView(row);
+        scroll.addView(row);
+        content.addView(scroll);
     }
 
     private void addGenreGrid() {
@@ -458,7 +564,7 @@ public final class CatalogActivity extends Activity {
     }
 
     private LinearLayout.LayoutParams genreParams() {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(205), dp(60));
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(205), dp(58));
         p.rightMargin = dp(12);
         return p;
     }
@@ -484,7 +590,7 @@ public final class CatalogActivity extends Activity {
         network.execute(() -> {
             List<CatalogItem> items;
             String error = null;
-            try { items = CatalogScraper.fetchItems(genre.path); }
+            try { items = CatalogScraper.fetchItems(genre.path, "movie"); }
             catch (Exception e) { items = Collections.emptyList(); error = message(e); }
             final List<CatalogItem> found = items;
             final String problem = error;
@@ -501,8 +607,16 @@ public final class CatalogActivity extends Activity {
     }
 
     private void open(CatalogItem item) {
-        android.content.Intent intent = new android.content.Intent(this, WatchActivity.class);
+        Class<?> target = SiteConfig.SHOW_DETAIL_SCREEN ? DetailActivity.class : WatchActivity.class;
+        Intent intent = new Intent(this, target);
         intent.putExtra("url", item.watchUrl);
+        intent.putExtra("title", item.title);
+        intent.putExtra("mediaId", item.mediaId);
+        intent.putExtra("mediaType", item.mediaType);
+        intent.putExtra("posterUrl", item.posterUrl);
+        intent.putExtra("backdropUrl", item.backdropUrl);
+        intent.putExtra("overview", item.overview);
+        intent.putExtra("details", item.details);
         startActivity(intent);
     }
 

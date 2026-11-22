@@ -1,6 +1,7 @@
 package tv.harness;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -10,12 +11,16 @@ import android.net.http.SslError;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.webkit.CookieManager;
+import android.webkit.JsPromptResult;
+import android.webkit.JsResult;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -36,17 +41,30 @@ import org.json.JSONObject;
 import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-/** Compact player screen with native, focusable remote controls and overlay episode picker. */
+/**
+ * Compact player screen with native, focusable remote controls, popup/redirect
+ * blocking, optional direct-embed server failover, HTML5 video watchdog, and
+ * overlay episode picker.
+ */
 public final class WatchActivity extends Activity {
+    private static final String TAG = "TvHarness";
     private static final String HOME_URL = SiteConfig.BASE_URL + SiteConfig.HOME_PATH;
     private static final int BG = Color.rgb(10, 12, 18);
     private static final int ACCENT = Color.rgb(126, 91, 242);
     private static final int FOCUS = Color.rgb(83, 184, 255);
-    private static final int GLASS_BG = Color.argb(205, 14, 18, 27);
-    private static final int GLASS_BTN = Color.argb(215, 30, 35, 48);
-    private static final int AUTO_HIDE_DELAY_MS = 4000;
+    private static final int GLASS_BG = Color.argb(215, 14, 18, 27);
+    private static final int GLASS_BTN = Color.argb(220, 30, 35, 48);
+    private static final int AUTO_HIDE_DELAY_MS = 4500;
+    private static final int WATCHDOG_INTERVAL_MS = 1500;
 
     private static class EpisodeInfo {
         final String num;
@@ -60,26 +78,55 @@ public final class WatchActivity extends Activity {
 
     private FrameLayout rootOverlay;
     private LinearLayout toolbar;
+    private LinearLayout topBar;
+    private LinearLayout bottomContainer;
     private LinearLayout controls;
     private LinearLayout episodeSheet;
     private LinearLayout episodeListContainer;
     private HorizontalScrollView episodeScrollView;
     private TextView episodeSheetTitle;
     private TextView title;
+    private TextView serverButton;
+    private TextView pauseButton;
+    private TextView soundButton;
     private TextView autoplayButton;
+    private TextView timeLabel;
+    private ProgressBar seekProgress;
     private ProgressBar progress;
+    private LinearLayout loadingOverlay;
+    private TextView loadingText;
     private WebView web;
     private FrameLayout playerArea;
     private View fullscreenView;
     private WebChromeClient.CustomViewCallback fullscreenCallback;
     private boolean autoplayOn;
 
-    private final Handler hideHandler = new Handler(Looper.getMainLooper());
+    private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable hideControlsRunnable = this::hideOsd;
+    private final Runnable watchdogRunnable = this::pollVideoState;
+    private final ExecutorService bgWorkers = Executors.newSingleThreadExecutor();
+
     private boolean osdVisible = true;
     private boolean episodeSheetVisible = false;
     private final List<EpisodeInfo> loadedEpisodes = new ArrayList<>();
     private String currentEpisodeNum = "";
+
+    // Playback metadata & direct-embed state
+    private String itemTitle = "";
+    private String mediaId = "";
+    private String mediaType = "movie";
+    private int currentSeason = 1;
+    private int currentEpisode = 1;
+    private boolean directEmbedMode = false;
+    private int currentServerIndex = 0;
+    private long serverLoadStartedMs = 0L;
+    private boolean playbackStarted = false;
+    private boolean userPaused = false;
+    private boolean userMuted = false;
+    private boolean videoCurrentlyPaused = false;
+    private boolean videoCurrentlyMuted = false;
+    private int playClickAttempts = 0;
+    private int blockedReqCount = 0;
 
     @Override
     public void onCreate(Bundle state) {
@@ -87,11 +134,137 @@ public final class WatchActivity extends Activity {
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
                 WindowManager.LayoutParams.FLAG_FULLSCREEN);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+        parseIntentMeta();
         buildUi();
         configureWebView();
-        if (state == null) web.loadUrl(startUrl());
-        else web.restoreState(state);
+
+        if (state == null) {
+            if (directEmbedMode) {
+                loadDirectEmbedServer(0);
+            } else {
+                serverLoadStartedMs = SystemClock.elapsedRealtime();
+                web.loadUrl(startUrl());
+            }
+        } else {
+            web.restoreState(state);
+        }
+
+        if (directEmbedMode && "tv".equalsIgnoreCase(mediaType)) {
+            fetchNativeTvEpisodes();
+        }
+        startWatchdog();
         scheduleHideOsd();
+    }
+
+    private void parseIntentMeta() {
+        Intent i = getIntent();
+        String url = i.getStringExtra("url");
+        itemTitle = i.getStringExtra("title");
+        if (itemTitle == null) itemTitle = "";
+        mediaId = i.getStringExtra("mediaId");
+        if (mediaId == null) mediaId = "";
+        mediaType = i.getStringExtra("mediaType");
+        if (mediaType == null || mediaType.isEmpty()) {
+            if (url != null && !SiteConfig.DIRECT_EMBED_TV_MARKER.isEmpty()
+                    && url.contains(SiteConfig.DIRECT_EMBED_TV_MARKER)) {
+                mediaType = "tv";
+            } else {
+                mediaType = "movie";
+            }
+        }
+        currentSeason = Math.max(1, i.getIntExtra("season", 1));
+        currentEpisode = Math.max(1, i.getIntExtra("episode", 1));
+        currentEpisodeNum = String.valueOf(currentEpisode);
+
+        if (mediaId.isEmpty() && url != null && !SiteConfig.DIRECT_EMBED_ID_REGEX.isEmpty()) {
+            Matcher m = Pattern.compile(SiteConfig.DIRECT_EMBED_ID_REGEX).matcher(url);
+            if (m.find() && m.groupCount() >= 1) {
+                mediaId = m.group(1);
+            }
+        }
+
+        String[] templates = currentEmbedTemplates();
+        directEmbedMode = !mediaId.isEmpty() && templates.length > 0;
+    }
+
+    private String[] currentEmbedTemplates() {
+        if ("tv".equalsIgnoreCase(mediaType) && SiteConfig.DIRECT_EMBED_TV_URLS.length > 0) {
+            return SiteConfig.DIRECT_EMBED_TV_URLS;
+        }
+        return SiteConfig.DIRECT_EMBED_MOVIE_URLS;
+    }
+
+    private String serverLabel(int idx) {
+        if (SiteConfig.DIRECT_EMBED_LABELS != null && idx < SiteConfig.DIRECT_EMBED_LABELS.length
+                && !SiteConfig.DIRECT_EMBED_LABELS[idx].isEmpty()) {
+            return SiteConfig.DIRECT_EMBED_LABELS[idx];
+        }
+        return "Server " + (idx + 1);
+    }
+
+    private void loadDirectEmbedServer(int index) {
+        String[] templates = currentEmbedTemplates();
+        if (templates.length == 0) return;
+        currentServerIndex = Math.max(0, Math.min(index, templates.length - 1));
+        playbackStarted = false;
+        userPaused = false;
+        playClickAttempts = 0;
+        serverLoadStartedMs = SystemClock.elapsedRealtime();
+
+        String embedUrl = templates[currentServerIndex]
+                .replace("{id}", mediaId)
+                .replace("{season}", String.valueOf(currentSeason))
+                .replace("{episode}", String.valueOf(currentEpisode));
+
+        String label = serverLabel(currentServerIndex);
+        Log.i(TAG, "LOAD_EMBED [" + label + "] " + embedUrl);
+        updateHeaderTitle();
+        showLoadingOverlay("Loading " + label + "…");
+
+        Map<String, String> headers = new HashMap<>();
+        String ref = (SiteConfig.DIRECT_EMBED_REFERER != null && !SiteConfig.DIRECT_EMBED_REFERER.isEmpty())
+                ? SiteConfig.DIRECT_EMBED_REFERER
+                : (SiteConfig.BASE_URL + "/");
+        headers.put("Referer", ref);
+        web.stopLoading();
+        web.loadUrl(embedUrl, headers);
+    }
+
+    private void switchToNextServer(boolean automatic) {
+        String[] templates = currentEmbedTemplates();
+        if (templates.length <= 1) return;
+        int next = (currentServerIndex + 1) % templates.length;
+        if (automatic && next == 0) {
+            // Exhausted all servers automatically — stop cycling and inform user
+            Log.w(TAG, "FAILOVER_EXHAUSTED all " + templates.length + " servers stalled");
+            showLoadingOverlay("Stream unavailable on all servers — press RELOAD or BACK");
+            Toast.makeText(this, "No working server found. Press RELOAD or BACK.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        String msg = automatic
+                ? (serverLabel(currentServerIndex) + " stalled — trying " + serverLabel(next) + "…")
+                : ("Switching to " + serverLabel(next) + "…");
+        Log.i(TAG, "SERVER_SWITCH: " + msg);
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
+        loadDirectEmbedServer(next);
+    }
+
+    private void updateHeaderTitle() {
+        if (title == null) return;
+        String base = !itemTitle.isEmpty() ? itemTitle : (SiteConfig.DISPLAY_NAME + " PLAYER");
+        if (directEmbedMode) {
+            String epTag = "tv".equalsIgnoreCase(mediaType)
+                    ? ("  ·  S" + currentSeason + " E" + currentEpisode) : "";
+            String srv = "  ·  " + serverLabel(currentServerIndex)
+                    + " (" + (currentServerIndex + 1) + "/" + currentEmbedTemplates().length + ")";
+            title.setText(base + epTag + srv);
+            if (serverButton != null) {
+                serverButton.setText("SERVER " + (currentServerIndex + 1) + "/" + currentEmbedTemplates().length);
+            }
+        } else {
+            title.setText(base);
+        }
     }
 
     private void buildUi() {
@@ -111,26 +284,62 @@ public final class WatchActivity extends Activity {
         playerArea.addView(web, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
+        // Centered loading indicator shown until video frames advance
+        loadingOverlay = new LinearLayout(this);
+        loadingOverlay.setOrientation(LinearLayout.HORIZONTAL);
+        loadingOverlay.setGravity(Gravity.CENTER);
+        loadingOverlay.setPadding(dp(22), dp(14), dp(22), dp(14));
+        GradientDrawable loadBg = new GradientDrawable();
+        loadBg.setColor(Color.argb(215, 14, 18, 28));
+        loadBg.setCornerRadius(dp(14));
+        loadBg.setStroke(dp(1), Color.argb(80, 255, 255, 255));
+        loadingOverlay.setBackground(loadBg);
+
+        ProgressBar spinner = new ProgressBar(this);
+        spinner.setIndeterminate(true);
+        spinner.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(FOCUS));
+        LinearLayout.LayoutParams spLp = new LinearLayout.LayoutParams(dp(26), dp(26));
+        spLp.rightMargin = dp(12);
+        loadingOverlay.addView(spinner, spLp);
+
+        loadingText = new TextView(this);
+        loadingText.setText("Loading stream…");
+        loadingText.setTextColor(Color.WHITE);
+        loadingText.setTextSize(15);
+        loadingText.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        loadingOverlay.addView(loadingText);
+        loadingOverlay.setVisibility(View.GONE);
+
+        rootOverlay.addView(loadingOverlay, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
+
+        // Top toolbar
         toolbar = new LinearLayout(this);
         toolbar.setOrientation(LinearLayout.VERTICAL);
         toolbar.setBackground(topScrimDrawable());
 
-        LinearLayout topBar = new LinearLayout(this);
+        topBar = new LinearLayout(this);
         topBar.setGravity(Gravity.CENTER_VERTICAL);
         topBar.setPadding(dp(24), dp(10), dp(24), dp(8));
 
         title = new TextView(this);
-        title.setText(SiteConfig.DISPLAY_NAME + " PLAYER");
         title.setTextColor(Color.WHITE);
-        title.setTextSize(18);
+        title.setTextSize(17);
+        title.setSingleLine(true);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         topBar.addView(title, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        if (!SiteConfig.EPISODE_LIST_SELECTOR.isEmpty()) {
-            topBar.addView(action("EPISODES", "Episodes", this::toggleEpisodeSheet), headerButtonParams());
+
+        if (directEmbedMode && currentEmbedTemplates().length > 1) {
+            serverButton = action("SERVER", "Switch stream server", () -> switchToNextServer(false));
+            topBar.addView(serverButton, headerButtonParams(dp(116)));
         }
-        topBar.addView(action("RELOAD", "Reload player", () -> web.reload()), headerButtonParams());
-        topBar.addView(action("BROWSE", "Browse catalogue", this::finish), headerButtonParams());
+        if (hasEpisodePicker()) {
+            topBar.addView(action("EPISODES", "Episodes", this::toggleEpisodeSheet), headerButtonParams(dp(106)));
+        }
+        topBar.addView(action("RELOAD", "Reload player", this::reloadCurrent), headerButtonParams(dp(96)));
+        topBar.addView(action("BACK", "Return", this::finish), headerButtonParams(dp(92)));
         toolbar.addView(topBar, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -144,6 +353,7 @@ public final class WatchActivity extends Activity {
         rootOverlay.addView(toolbar, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP));
 
+        // Episode sheet overlay
         episodeSheet = new LinearLayout(this);
         episodeSheet.setOrientation(LinearLayout.VERTICAL);
         episodeSheet.setBackground(sheetBackgroundDrawable());
@@ -159,7 +369,7 @@ public final class WatchActivity extends Activity {
         episodeSheetTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         sheetHeader.addView(episodeSheetTitle, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        sheetHeader.addView(action("CLOSE ✕", "Close episodes", this::toggleEpisodeSheet), headerButtonParams());
+        sheetHeader.addView(action("CLOSE ✕", "Close episodes", this::toggleEpisodeSheet), headerButtonParams(dp(106)));
         episodeSheet.addView(sheetHeader, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -176,43 +386,116 @@ public final class WatchActivity extends Activity {
 
         FrameLayout.LayoutParams sheetParams = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
-        sheetParams.bottomMargin = dp(88);
+        sheetParams.bottomMargin = dp(116);
         sheetParams.leftMargin = dp(24);
         sheetParams.rightMargin = dp(24);
         rootOverlay.addView(episodeSheet, sheetParams);
 
+        // Bottom OSD: progress/time bar + transport controls
+        bottomContainer = new LinearLayout(this);
+        bottomContainer.setOrientation(LinearLayout.VERTICAL);
+        bottomContainer.setBackground(bottomScrimDrawable());
+        bottomContainer.setPadding(dp(20), dp(10), dp(20), dp(12));
+
+        LinearLayout timeRow = new LinearLayout(this);
+        timeRow.setOrientation(LinearLayout.HORIZONTAL);
+        timeRow.setGravity(Gravity.CENTER_VERTICAL);
+        timeRow.setPadding(dp(6), 0, dp(6), dp(8));
+
+        timeLabel = new TextView(this);
+        timeLabel.setText("00:00 / --:--");
+        timeLabel.setTextColor(Color.rgb(220, 226, 238));
+        timeLabel.setTextSize(13);
+        timeLabel.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        LinearLayout.LayoutParams timeLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        timeLp.rightMargin = dp(14);
+        timeRow.addView(timeLabel, timeLp);
+
+        seekProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        seekProgress.setMax(1000);
+        seekProgress.setProgress(0);
+        seekProgress.setProgressTintList(android.content.res.ColorStateList.valueOf(FOCUS));
+        seekProgress.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.argb(90, 255, 255, 255)));
+        timeRow.addView(seekProgress, new LinearLayout.LayoutParams(0, dp(5), 1));
+        bottomContainer.addView(timeRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         controls = new LinearLayout(this);
         controls.setGravity(Gravity.CENTER);
         controls.setOrientation(LinearLayout.HORIZONTAL);
-        controls.setPadding(dp(16), dp(10), dp(16), dp(12));
-        controls.setBackground(bottomScrimDrawable());
 
-        controls.addView(square("Ⅱ\nPAUSE / PLAY", "Pause or play", this::togglePause), controlParams());
-        controls.addView(square("◀\nPREV", "Previous episode", () -> pageClick(SiteConfig.PREV_EPISODE_SELECTOR)), controlParams());
-        controls.addView(square("▶\nNEXT", "Next episode", () -> pageClick(SiteConfig.NEXT_EPISODE_SELECTOR)), controlParams());
-        if (!SiteConfig.EPISODE_LIST_SELECTOR.isEmpty()) {
-            controls.addView(square("≡\nEPISODES", "Episodes list", this::toggleEpisodeSheet), controlParams());
+        pauseButton = square("Ⅱ\nPAUSE", "Pause or play", this::togglePause);
+        controls.addView(pauseButton, controlParams());
+
+        if (directEmbedMode) {
+            controls.addView(square("⏪\n-15s", "Rewind 15 seconds", () -> seekBy(-15)), controlParams());
+            controls.addView(square("⏩\n+15s", "Forward 15 seconds", () -> seekBy(15)), controlParams());
+            if ("tv".equalsIgnoreCase(mediaType)) {
+                controls.addView(square("◀\nPREV EP", "Previous episode", () -> stepTvEpisode(-1)), controlParams());
+                controls.addView(square("▶\nNEXT EP", "Next episode", () -> stepTvEpisode(1)), controlParams());
+            }
+            soundButton = square("🔊\nSOUND ON", "Toggle sound", this::toggleSound);
+            controls.addView(soundButton, controlParams());
+        } else {
+            controls.addView(square("◀\nPREV", "Previous episode", () -> pageClick(SiteConfig.PREV_EPISODE_SELECTOR)), controlParams());
+            controls.addView(square("▶\nNEXT", "Next episode", () -> pageClick(SiteConfig.NEXT_EPISODE_SELECTOR)), controlParams());
+            if (!SiteConfig.EPISODE_LIST_SELECTOR.isEmpty()) {
+                controls.addView(square("≡\nEPISODES", "Episodes list", this::toggleEpisodeSheet), controlParams());
+            }
+            autoplayButton = square("AUTO PLAY\n…", "Toggle autoplay", this::toggleAutoplay);
+            controls.addView(autoplayButton, controlParams());
         }
-        autoplayButton = square("AUTO PLAY\n…", "Toggle autoplay", this::toggleAutoplay);
-        controls.addView(autoplayButton, controlParams());
 
-        rootOverlay.addView(controls, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(86), Gravity.BOTTOM));
+        bottomContainer.addView(controls, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(64)));
 
+        rootOverlay.addView(bottomContainer, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
+
+        updateHeaderTitle();
         setContentView(rootOverlay);
-        web.requestFocus();
+        controls.getChildAt(0).requestFocus();
+    }
+
+    private boolean hasEpisodePicker() {
+        if (directEmbedMode && "tv".equalsIgnoreCase(mediaType)
+                && SiteConfig.TV_SEASON_PATH_TEMPLATE != null
+                && !SiteConfig.TV_SEASON_PATH_TEMPLATE.isEmpty()) {
+            return true;
+        }
+        return SiteConfig.EPISODE_LIST_SELECTOR != null && !SiteConfig.EPISODE_LIST_SELECTOR.isEmpty();
+    }
+
+    private void reloadCurrent() {
+        if (directEmbedMode) {
+            loadDirectEmbedServer(currentServerIndex);
+        } else {
+            playbackStarted = false;
+            serverLoadStartedMs = SystemClock.elapsedRealtime();
+            web.reload();
+        }
+    }
+
+    private void showLoadingOverlay(String message) {
+        if (loadingText != null) loadingText.setText(message);
+        if (loadingOverlay != null) loadingOverlay.setVisibility(View.VISIBLE);
+    }
+
+    private void hideLoadingOverlay() {
+        if (loadingOverlay != null) loadingOverlay.setVisibility(View.GONE);
     }
 
     private GradientDrawable topScrimDrawable() {
         return new GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{Color.argb(220, 10, 12, 18), Color.argb(160, 10, 12, 18), Color.TRANSPARENT});
+                new int[]{Color.argb(225, 10, 12, 18), Color.argb(150, 10, 12, 18), Color.TRANSPARENT});
     }
 
     private GradientDrawable bottomScrimDrawable() {
         return new GradientDrawable(
                 GradientDrawable.Orientation.BOTTOM_TOP,
-                new int[]{Color.argb(235, 10, 12, 18), Color.argb(175, 10, 12, 18), Color.TRANSPARENT});
+                new int[]{Color.argb(240, 10, 12, 18), Color.argb(190, 10, 12, 18), Color.TRANSPARENT});
     }
 
     private GradientDrawable sheetBackgroundDrawable() {
@@ -223,14 +506,14 @@ public final class WatchActivity extends Activity {
         return bg;
     }
 
-    private LinearLayout.LayoutParams headerButtonParams() {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(106), dp(38));
+    private LinearLayout.LayoutParams headerButtonParams(int widthPx) {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(widthPx, dp(38));
         p.leftMargin = dp(8);
         return p;
     }
 
     private LinearLayout.LayoutParams controlParams() {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(64), 1);
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(60), 1);
         p.leftMargin = dp(6);
         p.rightMargin = dp(6);
         return p;
@@ -282,18 +565,15 @@ public final class WatchActivity extends Activity {
     }
 
     private void scheduleHideOsd() {
-        hideHandler.removeCallbacks(hideControlsRunnable);
-        if (episodeSheetVisible) {
-            // Keep controls visible while selecting episodes
-            return;
-        }
-        hideHandler.postDelayed(hideControlsRunnable, AUTO_HIDE_DELAY_MS);
+        handler.removeCallbacks(hideControlsRunnable);
+        if (episodeSheetVisible) return;
+        handler.postDelayed(hideControlsRunnable, AUTO_HIDE_DELAY_MS);
     }
 
     private void showOsd() {
         osdVisible = true;
         toolbar.setVisibility(View.VISIBLE);
-        controls.setVisibility(View.VISIBLE);
+        bottomContainer.setVisibility(View.VISIBLE);
         scheduleHideOsd();
     }
 
@@ -301,26 +581,30 @@ public final class WatchActivity extends Activity {
         if (episodeSheetVisible) return;
         osdVisible = false;
         toolbar.setVisibility(View.GONE);
-        controls.setVisibility(View.GONE);
+        bottomContainer.setVisibility(View.GONE);
         if (web != null && !web.hasFocus()) {
             web.requestFocus();
         }
     }
 
     private void toggleEpisodeSheet() {
-        if (SiteConfig.EPISODE_LIST_SELECTOR.isEmpty()) {
-            Toast.makeText(this, "Episodes not available for this site", Toast.LENGTH_SHORT).show();
+        if (!hasEpisodePicker()) {
+            Toast.makeText(this, "Episodes not available", Toast.LENGTH_SHORT).show();
             return;
         }
         episodeSheetVisible = !episodeSheetVisible;
         if (episodeSheetVisible) {
             showOsd();
-            hideHandler.removeCallbacks(hideControlsRunnable);
+            handler.removeCallbacks(hideControlsRunnable);
             episodeSheet.setVisibility(View.VISIBLE);
             if (loadedEpisodes.isEmpty()) {
                 populateEpisodeUi();
             }
-            fetchEpisodesFromPage();
+            if (directEmbedMode) {
+                fetchNativeTvEpisodes();
+            } else {
+                fetchEpisodesFromPage();
+            }
             if (episodeListContainer.getChildCount() > 0) {
                 focusCurrentEpisodeOrFirst();
             }
@@ -331,6 +615,40 @@ public final class WatchActivity extends Activity {
                 controls.getChildAt(0).requestFocus();
             }
         }
+    }
+
+    private void fetchNativeTvEpisodes() {
+        if (mediaId.isEmpty()) return;
+        bgWorkers.execute(() -> {
+            try {
+                List<CatalogScraper.TvEpisode> eps = CatalogScraper.fetchTvEpisodes(mediaId, currentSeason);
+                runOnUiThread(() -> {
+                    if (isFinishing()) return;
+                    loadedEpisodes.clear();
+                    for (CatalogScraper.TvEpisode e : eps) {
+                        loadedEpisodes.add(new EpisodeInfo(String.valueOf(e.episode), e.name));
+                    }
+                    if (episodeSheetVisible) populateEpisodeUi();
+                });
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private void stepTvEpisode(int delta) {
+        int target = currentEpisode + delta;
+        if (target < 1) {
+            Toast.makeText(this, "Already at Episode 1", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (!loadedEpisodes.isEmpty() && target > loadedEpisodes.size()) {
+            Toast.makeText(this, "Last episode of Season " + currentSeason, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        currentEpisode = target;
+        currentEpisodeNum = String.valueOf(currentEpisode);
+        Toast.makeText(this, "Loading S" + currentSeason + " E" + currentEpisode + "…", Toast.LENGTH_SHORT).show();
+        loadDirectEmbedServer(currentServerIndex);
     }
 
     private void focusCurrentEpisodeOrFirst() {
@@ -356,8 +674,7 @@ public final class WatchActivity extends Activity {
     }
 
     private void fetchEpisodesFromPage() {
-        if (web == null) return;
-        if (SiteConfig.EPISODE_LIST_SELECTOR.isEmpty()) return;
+        if (web == null || SiteConfig.EPISODE_LIST_SELECTOR.isEmpty()) return;
         String js = "(function(){"
                 + "var eps=[];"
                 + "var active=document.querySelector(" + jsQuote(SiteConfig.EPISODE_ACTIVE_SELECTOR) + ");"
@@ -395,7 +712,6 @@ public final class WatchActivity extends Activity {
             ProgressBar spinner = new ProgressBar(this);
             spinner.setIndeterminate(true);
             spinner.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(ACCENT));
-            spinner.setContentDescription("Loading episodes…");
             LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(dp(24), dp(24));
             sp.gravity = Gravity.CENTER_VERTICAL;
             sp.rightMargin = dp(10);
@@ -403,7 +719,7 @@ public final class WatchActivity extends Activity {
             episodeListContainer.addView(spinner, sp);
 
             TextView empty = new TextView(this);
-            empty.setText("Loading episodes from source…");
+            empty.setText("Loading episodes…");
             empty.setTextColor(Color.rgb(180, 185, 200));
             empty.setTextSize(14);
             empty.setGravity(Gravity.CENTER_VERTICAL);
@@ -411,7 +727,7 @@ public final class WatchActivity extends Activity {
             return;
         }
 
-        episodeSheetTitle.setText("SELECT EPISODE (" + loadedEpisodes.size() + " TOTAL)");
+        episodeSheetTitle.setText("SEASON " + currentSeason + "  ·  " + loadedEpisodes.size() + " EPISODES");
 
         for (EpisodeInfo ep : loadedEpisodes) {
             final String num = ep.num;
@@ -459,6 +775,15 @@ public final class WatchActivity extends Activity {
     private void selectEpisode(String num) {
         currentEpisodeNum = num;
         toggleEpisodeSheet();
+        if (directEmbedMode) {
+            try {
+                currentEpisode = Integer.parseInt(num);
+            } catch (NumberFormatException ignored) {
+            }
+            Toast.makeText(this, "Loading S" + currentSeason + " E" + currentEpisode + "…", Toast.LENGTH_SHORT).show();
+            loadDirectEmbedServer(currentServerIndex);
+            return;
+        }
         Toast.makeText(this, "Loading Episode " + num + "…", Toast.LENGTH_SHORT).show();
         String js = "(function(){"
                 + "var sel=" + jsQuote(SiteConfig.EPISODE_LIST_SELECTOR) + ";"
@@ -492,6 +817,9 @@ public final class WatchActivity extends Activity {
         settings.setLoadsImagesAutomatically(true);
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
+        if (SiteConfig.USER_AGENT != null && !SiteConfig.USER_AGENT.isEmpty()) {
+            settings.setUserAgentString(SiteConfig.USER_AGENT);
+        }
         CookieManager cookies = CookieManager.getInstance();
         cookies.setAcceptCookie(true);
         cookies.setAcceptThirdPartyCookies(web, true);
@@ -499,12 +827,23 @@ public final class WatchActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return request.isForMainFrame() && AdBlocker.blocks(request.getUrl().toString());
+                String url = request.getUrl().toString();
+                if (!request.isForMainFrame()) {
+                    return AdBlocker.blocks(url);
+                }
+                if (AdBlocker.blocks(url)) {
+                    Log.i(TAG, "BLOCKED_REDIRECT_AD: " + url);
+                    return true;
+                }
+                if (SiteConfig.STRICT_MAIN_FRAME_ALLOWLIST && !AdBlocker.isFirstPartyHost(url)) {
+                    Log.i(TAG, "BLOCKED_REDIRECT_OFFHOST: " + url);
+                    return true;
+                }
+                return false;
             }
 
             @Override
-            public WebResourceResponse shouldInterceptRequest(WebView view,
-                                                               WebResourceRequest request) {
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 return blockedResponse(request.getUrl().toString());
             }
 
@@ -517,17 +856,22 @@ public final class WatchActivity extends Activity {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
                 progress.setVisibility(View.VISIBLE);
+                view.evaluateJavascript(earlyAntiPopupScript(), null);
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
                 progress.setVisibility(View.GONE);
-                Uri uri = Uri.parse(url);
-                String host = uri.getHost();
-                if (host != null) title.setText(host + "  ·  PLAYER");
+                if (!directEmbedMode) {
+                    Uri uri = Uri.parse(url);
+                    String host = uri.getHost();
+                    if (host != null && itemTitle.isEmpty()) title.setText(host + "  ·  PLAYER");
+                }
                 view.evaluateJavascript(playerPageScript(), null);
-                updateAutoplayState();
-                fetchEpisodesFromPage();
+                if (!directEmbedMode) {
+                    updateAutoplayState();
+                    fetchEpisodesFromPage();
+                }
             }
 
             @Override
@@ -541,6 +885,7 @@ public final class WatchActivity extends Activity {
             @Override
             public boolean onCreateWindow(WebView view, boolean dialog, boolean userGesture,
                                           android.os.Message resultMsg) {
+                Log.i(TAG, "BLOCKED_POPUP: onCreateWindow userGesture=" + userGesture);
                 return false;
             }
 
@@ -569,15 +914,23 @@ public final class WatchActivity extends Activity {
             }
 
             @Override
-            public boolean onJsAlert(WebView view, String url, String message,
-                                     android.webkit.JsResult result) {
+            public boolean onJsAlert(WebView view, String url, String message, JsResult result) {
+                Log.i(TAG, "BLOCKED_JS_ALERT: " + message);
                 result.cancel();
                 return true;
             }
 
             @Override
-            public boolean onJsConfirm(WebView view, String url, String message,
-                                       android.webkit.JsResult result) {
+            public boolean onJsConfirm(WebView view, String url, String message, JsResult result) {
+                Log.i(TAG, "BLOCKED_JS_CONFIRM: " + message);
+                result.cancel();
+                return true;
+            }
+
+            @Override
+            public boolean onJsPrompt(WebView view, String url, String message, String defaultValue,
+                                      JsPromptResult result) {
+                Log.i(TAG, "BLOCKED_JS_PROMPT: " + message);
                 result.cancel();
                 return true;
             }
@@ -586,8 +939,148 @@ public final class WatchActivity extends Activity {
 
     private WebResourceResponse blockedResponse(String url) {
         if (!AdBlocker.blocks(url)) return null;
+        blockedReqCount++;
+        if (blockedReqCount <= 40 || blockedReqCount % 10 == 0) {
+            Log.i(TAG, "BLOCKED_REQ (#" + blockedReqCount + "): " + url);
+        }
         return new WebResourceResponse("text/plain", "utf-8", 204, "No Content",
                 Collections.<String, String>emptyMap(), new ByteArrayInputStream(new byte[0]));
+    }
+
+    private void startWatchdog() {
+        handler.removeCallbacks(watchdogRunnable);
+        handler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL_MS);
+    }
+
+    private void pollVideoState() {
+        if (isFinishing() || web == null) return;
+        String focusSel = SiteConfig.PLAYER_FOCUS_SELECTOR == null ? "" : SiteConfig.PLAYER_FOCUS_SELECTOR;
+        String js = "(function(){"
+                + "var vids=document.querySelectorAll('video');"
+                + "var v=null;"
+                + "for(var i=0;i<vids.length;i++){if(vids[i].readyState>0||vids[i].currentSrc){v=vids[i];break;}}"
+                + "if(!v&&vids.length>0)v=vids[0];"
+                + "if(!v)return JSON.stringify({found:false});"
+                + "if(" + (SiteConfig.AUTO_UNMUTE ? "true" : "false") + "&&!" + (userMuted ? "true" : "false") + "&&v.muted){"
+                + "  try{v.muted=false;v.volume=1;}catch(e){}"
+                + "}"
+                + "if(!" + (userPaused ? "true" : "false") + "&&v.paused&&v.readyState>=2){"
+                + "  try{var p=v.play();if(p&&p.catch)p.catch(function(){});}catch(e){}"
+                + "}"
+                + "return JSON.stringify({found:true,rs:v.readyState,ct:v.currentTime||0,dur:isFinite(v.duration)?v.duration:0,"
+                + "paused:!!v.paused,muted:!!v.muted,vw:v.videoWidth||0,vh:v.videoHeight||0});"
+                + "})()";
+
+        web.evaluateJavascript(js, result -> {
+            if (isFinishing() || web == null) return;
+            boolean found = false;
+            int rs = 0;
+            double ct = 0;
+            double dur = 0;
+            boolean paused = true;
+            boolean muted = false;
+            int vw = 0;
+            int vh = 0;
+
+            if (result != null && !"null".equals(result)) {
+                try {
+                    String unquoted = new JSONObject("{data:" + result + "}").getString("data");
+                    JSONObject obj = new JSONObject(unquoted);
+                    found = obj.optBoolean("found", false);
+                    rs = obj.optInt("rs", 0);
+                    ct = obj.optDouble("ct", 0);
+                    dur = obj.optDouble("dur", 0);
+                    paused = obj.optBoolean("paused", true);
+                    muted = obj.optBoolean("muted", false);
+                    vw = obj.optInt("vw", 0);
+                    vh = obj.optInt("vh", 0);
+                } catch (Exception ignored) {
+                }
+            }
+
+            videoCurrentlyPaused = paused;
+            videoCurrentlyMuted = muted;
+
+            if (found) {
+                if (pauseButton != null) {
+                    pauseButton.setText(paused ? "▶\nPLAY" : "Ⅱ\nPAUSE");
+                }
+                if (soundButton != null) {
+                    soundButton.setText(muted ? "🔇\nMUTED" : "🔊\nSOUND ON");
+                }
+                if (timeLabel != null) {
+                    timeLabel.setText(formatTime(ct) + " / " + (dur > 0 ? formatTime(dur) : "--:--"));
+                }
+                if (seekProgress != null && dur > 0) {
+                    seekProgress.setProgress((int) Math.min(1000, Math.max(0, (ct / dur) * 1000.0)));
+                }
+            }
+
+            if (found && ct > 0.25) {
+                if (!playbackStarted) {
+                    playbackStarted = true;
+                    hideLoadingOverlay();
+                    Log.i(TAG, "PLAYBACK_STARTED server=" + serverLabel(currentServerIndex)
+                            + " ct=" + String.format(Locale.US, "%.1f", ct)
+                            + " dur=" + String.format(Locale.US, "%.0f", dur)
+                            + " res=" + vw + "x" + vh + " muted=" + muted);
+                    scheduleHideOsd();
+                }
+            } else if (!playbackStarted && directEmbedMode) {
+                long elapsed = SystemClock.elapsedRealtime() - serverLoadStartedMs;
+                // Try clicking the player's play button once after 3.5s if video exists but stayed paused
+                if (elapsed > 3500 && playClickAttempts < 2 && !focusSel.isEmpty()) {
+                    playClickAttempts++;
+                    web.evaluateJavascript("(function(){var b=document.querySelector("
+                            + jsQuote(focusSel) + ");if(b)b.click();})()", null);
+                }
+                if (SiteConfig.STALL_TIMEOUT_MS > 0 && elapsed > SiteConfig.STALL_TIMEOUT_MS
+                        && currentEmbedTemplates().length > 1) {
+                    Log.w(TAG, "STALL_DETECTED server=" + serverLabel(currentServerIndex)
+                            + " elapsed=" + elapsed + "ms rs=" + rs + " ct=" + ct);
+                    switchToNextServer(true);
+                }
+            }
+
+            handler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL_MS);
+        });
+    }
+
+    private static String formatTime(double seconds) {
+        int total = (int) Math.max(0, Math.floor(seconds));
+        int h = total / 3600;
+        int m = (total % 3600) / 60;
+        int s = total % 60;
+        if (h > 0) return String.format(Locale.US, "%d:%02d:%02d", h, m, s);
+        return String.format(Locale.US, "%02d:%02d", m, s);
+    }
+
+    private void seekBy(int deltaSeconds) {
+        if (web == null) return;
+        String js = "(function(){"
+                + "var v=document.querySelector('video');"
+                + "if(!v||!isFinite(v.duration))return false;"
+                + "v.currentTime=Math.max(0,Math.min(v.duration,v.currentTime+(" + deltaSeconds + ")));"
+                + "return true;})()";
+        web.evaluateJavascript(js, null);
+        scheduleHideOsd();
+    }
+
+    private void toggleSound() {
+        if (web == null) return;
+        userMuted = !videoCurrentlyMuted;
+        String js = "(function(){"
+                + "var v=document.querySelector('video');"
+                + "if(!v)return false;"
+                + "v.muted=" + (userMuted ? "true" : "false") + ";"
+                + "if(!v.muted)v.volume=1;"
+                + "return v.muted;})()";
+        web.evaluateJavascript(js, res -> {
+            videoCurrentlyMuted = "true".equals(res);
+            if (soundButton != null) {
+                soundButton.setText(videoCurrentlyMuted ? "🔇\nMUTED" : "🔊\nSOUND ON");
+            }
+        });
     }
 
     private void pageClick(String selector) {
@@ -637,18 +1130,58 @@ public final class WatchActivity extends Activity {
     }
 
     private void togglePause() {
-        // Prefer the site's own pause control; otherwise bridge Space to
-        // the player (many sites listen for it on the watch page).
+        if (web == null) return;
+        if (directEmbedMode) {
+            String js = "(function(){"
+                    + "var v=document.querySelector('video');"
+                    + "if(v){if(v.paused){var p=v.play();if(p&&p.catch)p.catch(function(){});return 'playing';}"
+                    + "else{v.pause();return 'paused';}}"
+                    + "var sel=" + jsQuote(SiteConfig.PAUSE_TOGGLE_SELECTOR == null ? "" : SiteConfig.PAUSE_TOGGLE_SELECTOR) + ";"
+                    + "if(sel){var e=document.querySelector(sel);if(e){e.click();return 'clicked';}}"
+                    + "return 'none';})()";
+            web.evaluateJavascript(js, res -> {
+                if (res != null && res.contains("paused")) {
+                    userPaused = true;
+                    videoCurrentlyPaused = true;
+                    if (pauseButton != null) pauseButton.setText("▶\nPLAY");
+                } else if (res != null && res.contains("playing")) {
+                    userPaused = false;
+                    videoCurrentlyPaused = false;
+                    if (pauseButton != null) pauseButton.setText("Ⅱ\nPAUSE");
+                }
+            });
+            return;
+        }
         String selector = SiteConfig.PAUSE_TOGGLE_SELECTOR;
         if (selector != null && !selector.isEmpty()) {
             web.evaluateJavascript("(function(){var e=document.querySelector("
                     + jsQuote(selector) + ");if(e){e.click();return true;}return false;})()", null);
             return;
         }
-        web.evaluateJavascript("(function(){var e=document.createEvent('Events');"
+        web.evaluateJavascript("(function(){var v=document.querySelector('video');"
+                + "if(v){if(v.paused)v.play();else v.pause();return true;}"
+                + "var e=document.createEvent('Events');"
                 + "e.initEvent('keydown',true,true);Object.defineProperty(e,'keyCode',{get:function(){return 32;}});"
                 + "Object.defineProperty(e,'which',{get:function(){return 32;}});window.dispatchEvent(e);return true;})()",
                 null);
+    }
+
+    private static String earlyAntiPopupScript() {
+        return "(function(){"
+                + "try{"
+                + "  window.open=function(){return null;};"
+                + "  window.alert=function(){};"
+                + "  window.confirm=function(){return false;};"
+                + "  window.prompt=function(){return null;};"
+                + "  if(!window.__tvNoBlank){"
+                + "    window.__tvNoBlank=1;"
+                + "    document.addEventListener('click',function(ev){"
+                + "      var a=ev.target&&ev.target.closest?ev.target.closest('a'):null;"
+                + "      if(a&&a.target==='_blank'){ev.preventDefault();ev.stopPropagation();}"
+                + "    },true);"
+                + "  }"
+                + "}catch(e){}"
+                + "})();";
     }
 
     /** Builds the page-customisation script from SiteConfig player selectors. */
@@ -676,25 +1209,20 @@ public final class WatchActivity extends Activity {
         }
         if (!frame.isEmpty()) {
             css.append(frame).append("{position:absolute!important;inset:0!important;")
-                    .append("width:100%!important;height:100%!important;border:0!important;}");
+                    .append("width:100%!important;height:100%!important;border:0!important;object-fit:contain!important;}");
         }
-        return "(function(){"
+        return earlyAntiPopupScript() + "(function(){"
                 + "var css=" + jsQuote(css.toString()) + ";"
                 + "var s=document.getElementById('tv-player-style');if(!s){s=document.createElement('style');"
                 + "s.id='tv-player-style';(document.head||document.documentElement).appendChild(s);}s.textContent=css;"
-                + "try{window.open=function(){return null};window.alert=function(){};}catch(e){}"
-                // Keep watching for the focus target: SPA pages render
-                // their player long after onPageFinished (client-side
-                // data fetch), so a short timeout misses it.
-                // Safety cap ~4 min.
                 + "if(!window.__tvFocusWatch){window.__tvFocusWatch=1;var n=0;var t=setInterval(function(){"
                 + "var p=" + (focus.isEmpty() ? "null" : "document.querySelector(" + jsQuote(focus) + ")") + ";"
                 + "if(p&&getComputedStyle(p).display!=='none'){"
                 + "if(p.scrollIntoView)p.scrollIntoView({block:'center'});"
                 + "p.setAttribute('tabindex','0');p.focus();clearInterval(t);}else{"
-                + "p=document.querySelector(" + jsQuote(frame.isEmpty() ? "iframe, video" : frame) + ");"
-                + "if(p){p.setAttribute('tabindex','0');"
-                + "p.focus();clearInterval(t);}}if(++n>480)clearInterval(t);},500);}"
+                + "p=document.querySelector(" + jsQuote(frame.isEmpty() ? "video, iframe" : frame) + ");"
+                + "if(p){p.setAttribute('tabindex','0');p.focus();clearInterval(t);}}"
+                + "if(++n>480)clearInterval(t);},500);}"
                 + "})();";
     }
 
@@ -713,20 +1241,34 @@ public final class WatchActivity extends Activity {
                 toggleEpisodeSheet();
                 return true;
             }
-            if (osdVisible) {
+            if (osdVisible && playbackStarted) {
                 hideOsd();
                 return true;
             }
-            if (web != null && web.canGoBack()) {
+            if (!directEmbedMode && web != null && web.canGoBack()) {
                 web.goBack();
                 return true;
             }
+            finish();
+            return true;
         }
 
         // Media keys
-        if (key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) {
+        if (key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                || key == KeyEvent.KEYCODE_MEDIA_PLAY
+                || key == KeyEvent.KEYCODE_MEDIA_PAUSE) {
             togglePause();
-            scheduleHideOsd();
+            showOsd();
+            return true;
+        }
+        if (key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD) {
+            seekBy(15);
+            showOsd();
+            return true;
+        }
+        if (key == KeyEvent.KEYCODE_MEDIA_REWIND) {
+            seekBy(-15);
+            showOsd();
             return true;
         }
 
@@ -751,7 +1293,7 @@ public final class WatchActivity extends Activity {
                 return true;
             }
             if (key == KeyEvent.KEYCODE_DPAD_UP) {
-                toolbar.getChildAt(0).requestFocus();
+                focusFirstToolbarButton();
                 return true;
             }
             return super.dispatchKeyEvent(event);
@@ -760,18 +1302,8 @@ public final class WatchActivity extends Activity {
         // Navigation between controls and top bar
         if (controls.hasFocus()) {
             if (key == KeyEvent.KEYCODE_DPAD_UP) {
-                if (toolbar.getVisibility() == View.VISIBLE) {
-                    View topBar = toolbar.getChildAt(0);
-                    if (topBar instanceof ViewGroup) {
-                        ViewGroup group = (ViewGroup) topBar;
-                        for (int i = 0; i < group.getChildCount(); i++) {
-                            View c = group.getChildAt(i);
-                            if (c.isFocusable()) {
-                                c.requestFocus();
-                                return true;
-                            }
-                        }
-                    }
+                if (toolbar.getVisibility() == View.VISIBLE && focusFirstToolbarButton()) {
+                    return true;
                 }
                 web.requestFocus();
                 return true;
@@ -798,15 +1330,48 @@ public final class WatchActivity extends Activity {
                 controls.getChildAt(0).requestFocus();
                 return true;
             }
-        }
-
-        if (key == KeyEvent.KEYCODE_DPAD_DOWN && !controls.hasFocus()) {
-            showOsd();
+            if (key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                List<View> buttons = focusableToolbarButtons();
+                View focused = getCurrentFocus();
+                int idx = buttons.indexOf(focused);
+                if (idx >= 0) {
+                    int delta = key == KeyEvent.KEYCODE_DPAD_RIGHT ? 1 : -1;
+                    int next = Math.max(0, Math.min(buttons.size() - 1, idx + delta));
+                    buttons.get(next).requestFocus();
+                    return true;
+                }
+            }
+            if (key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER) {
+                View focused = getCurrentFocus();
+                if (focused != null && topBar.indexOfChild(focused) >= 0) {
+                    focused.performClick();
+                    return true;
+                }
+            }
+        } else if (isDpadKey) {
             controls.getChildAt(0).requestFocus();
             return true;
         }
 
         return super.dispatchKeyEvent(event);
+    }
+
+    private List<View> focusableToolbarButtons() {
+        List<View> out = new ArrayList<>();
+        for (int i = 0; i < topBar.getChildCount(); i++) {
+            View c = topBar.getChildAt(i);
+            if (c.isFocusable() && c.getVisibility() == View.VISIBLE) out.add(c);
+        }
+        return out;
+    }
+
+    private boolean focusFirstToolbarButton() {
+        List<View> buttons = focusableToolbarButtons();
+        if (!buttons.isEmpty()) {
+            buttons.get(0).requestFocus();
+            return true;
+        }
+        return false;
     }
 
     private String startUrl() {
@@ -836,7 +1401,9 @@ public final class WatchActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        hideHandler.removeCallbacks(hideControlsRunnable);
+        handler.removeCallbacks(hideControlsRunnable);
+        handler.removeCallbacks(watchdogRunnable);
+        bgWorkers.shutdownNow();
         if (web != null) {
             web.stopLoading();
             web.loadUrl("about:blank");
