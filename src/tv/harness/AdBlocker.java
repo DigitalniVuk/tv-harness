@@ -17,6 +17,7 @@ import java.util.Set;
  */
 final class AdBlocker {
     private static final String[] FIRST_PARTY = SiteConfig.FIRST_PARTY_HOSTS;
+    private static final String[] ALLOWED_SUBRESOURCES = lowercaseArray(SiteConfig.ALLOWED_SUBRESOURCE_HOSTS);
     private static final String[] BLOCKED_TLDS = lowercaseArray(SiteConfig.BLOCKED_TLDS);
     private static final String[] BLOCKED_SUBSTRINGS = lowercaseArray(SiteConfig.BLOCKED_URL_SUBSTRINGS);
     private static final Set<String> DOMAINS = loadDomains();
@@ -77,6 +78,7 @@ final class AdBlocker {
 
         String host = rawUrl.substring(hostStart, hostEnd).toLowerCase(Locale.ROOT);
         if (matchesFirstParty(host)) return false;
+        if (matchesAllowedSubresource(host)) return false;
 
         String path = "";
         if (slash != -1) {
@@ -110,6 +112,7 @@ final class AdBlocker {
         if (host == null) return false;
         host = host.toLowerCase(Locale.ROOT);
         if (matchesFirstParty(host)) return false;
+        if (matchesAllowedSubresource(host)) return false;
         String path = uri.getPath() == null ? "" : uri.getPath().toLowerCase(Locale.ROOT);
         if (isMediaPath(path)) return false;
         if (hasBlockedTld(host)) return true;
@@ -133,6 +136,14 @@ final class AdBlocker {
             if (allowed == null || allowed.isEmpty()) continue;
             String a = allowed.toLowerCase(Locale.ROOT);
             if (host.equals(a) || host.endsWith("." + a)) return true;
+        }
+        return false;
+    }
+
+    private static boolean matchesAllowedSubresource(String host) {
+        for (String allowed : ALLOWED_SUBRESOURCES) {
+            if (allowed == null || allowed.isEmpty()) continue;
+            if (host.equals(allowed) || host.endsWith("." + allowed)) return true;
         }
         return false;
     }

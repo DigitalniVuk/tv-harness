@@ -159,6 +159,13 @@ public final class SiteConfig {
             "body>header,header,#footer,.footer,.sidebar,.breadcrumb,"
             + ".share-buttons,.comment,.comments";
 
+    /** Subtitle/caption containers preserved when hiding direct-embed web overlays. */
+    public static final String PLAYER_CAPTION_SELECTOR =
+            ".vjs-text-track-display,[class*='caption'],[class*='subtitle']";
+
+    /** Automatically hide web player overlay chrome around <video> in direct-embed mode. */
+    public static final boolean HIDE_DIRECT_EMBED_CHROME = true;
+
     /** CSS selectors that must stay visible and fill the player area. */
     public static final String PLAYER_KEEP_SELECTORS =
             "body,#watch-main,.watch-container,.aside-wrapper,aside.main,"
@@ -229,6 +236,14 @@ public final class SiteConfig {
 
     /** Block any top-level WebView navigation whose host is not in FIRST_PARTY_HOSTS. */
     public static final boolean STRICT_MAIN_FRAME_ALLOWLIST = false;
+
+    /**
+     * Subresource-only hosts exempt from EasyList domain blocking (evaluated
+     * AFTER BLOCKED_URL_SUBSTRINGS so malicious paths like anti-devtool scripts
+     * stay blocked while player libraries such as hls.js load). Never allowed
+     * as main-frame navigation targets.
+     */
+    public static final String[] ALLOWED_SUBRESOURCE_HOSTS = {};
 
     /** Additional ad/popunder/tracker domains beyond assets/blocking-domains.txt. */
     public static final String[] EXTRA_BLOCKED_DOMAINS = {};

@@ -8,6 +8,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.net.Uri;
 import android.net.http.SslError;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -119,6 +120,9 @@ public final class WatchActivity extends Activity {
     private int currentEpisode = 1;
     private boolean directEmbedMode = false;
     private int currentServerIndex = 0;
+    private int loadGeneration = 0;
+    private boolean pageCommitted = false;
+    private String expectedEmbedHost = "";
     private long serverLoadStartedMs = 0L;
     private boolean playbackStarted = false;
     private boolean userPaused = false;
@@ -207,6 +211,8 @@ public final class WatchActivity extends Activity {
         String[] templates = currentEmbedTemplates();
         if (templates.length == 0) return;
         currentServerIndex = Math.max(0, Math.min(index, templates.length - 1));
+        loadGeneration++;
+        pageCommitted = false;
         playbackStarted = false;
         userPaused = false;
         playClickAttempts = 0;
@@ -216,10 +222,14 @@ public final class WatchActivity extends Activity {
                 .replace("{id}", mediaId)
                 .replace("{season}", String.valueOf(currentSeason))
                 .replace("{episode}", String.valueOf(currentEpisode));
+        Uri parsed = Uri.parse(embedUrl);
+        expectedEmbedHost = parsed.getHost() == null ? "" : parsed.getHost();
 
         String label = serverLabel(currentServerIndex);
-        Log.i(TAG, "LOAD_EMBED [" + label + "] " + embedUrl);
+        Log.i(TAG, "LOAD_EMBED [" + label + "] gen=" + loadGeneration + " " + embedUrl);
         updateHeaderTitle();
+        if (timeLabel != null) timeLabel.setText("00:00 / --:--");
+        if (seekProgress != null) seekProgress.setProgress(0);
         showLoadingOverlay("Loading " + label + "…");
 
         Map<String, String> headers = new HashMap<>();
@@ -229,6 +239,7 @@ public final class WatchActivity extends Activity {
         headers.put("Referer", ref);
         web.stopLoading();
         web.loadUrl(embedUrl, headers);
+        startWatchdog();
     }
 
     private void switchToNextServer(boolean automatic) {
@@ -270,17 +281,22 @@ public final class WatchActivity extends Activity {
     private void buildUi() {
         rootOverlay = new FrameLayout(this);
         rootOverlay.setBackgroundColor(BG);
+        rootOverlay.setFocusable(directEmbedMode);
+        rootOverlay.setFocusableInTouchMode(directEmbedMode);
+        disableDefaultFocusHighlight(rootOverlay);
 
         playerArea = new FrameLayout(this);
         playerArea.setBackgroundColor(BG);
+        disableDefaultFocusHighlight(playerArea);
         rootOverlay.addView(playerArea, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         web = new WebView(this);
         web.setId(View.generateViewId());
-        web.setFocusable(true);
-        web.setFocusableInTouchMode(true);
+        web.setFocusable(!directEmbedMode);
+        web.setFocusableInTouchMode(!directEmbedMode);
         web.setBackgroundColor(BG);
+        disableDefaultFocusHighlight(web);
         playerArea.addView(web, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -570,10 +586,22 @@ public final class WatchActivity extends Activity {
         handler.postDelayed(hideControlsRunnable, AUTO_HIDE_DELAY_MS);
     }
 
+    private static void disableDefaultFocusHighlight(View view) {
+        if (view == null || Build.VERSION.SDK_INT < 26) return;
+        try {
+            View.class.getMethod("setDefaultFocusHighlightEnabled", boolean.class).invoke(view, false);
+        } catch (Exception ignored) {
+        }
+    }
+
     private void showOsd() {
         osdVisible = true;
         toolbar.setVisibility(View.VISIBLE);
         bottomContainer.setVisibility(View.VISIBLE);
+        if (!controls.hasFocus() && !toolbar.hasFocus() && !episodeSheetVisible
+                && controls.getChildCount() > 0) {
+            controls.getChildAt(0).requestFocus();
+        }
         scheduleHideOsd();
     }
 
@@ -582,7 +610,11 @@ public final class WatchActivity extends Activity {
         osdVisible = false;
         toolbar.setVisibility(View.GONE);
         bottomContainer.setVisibility(View.GONE);
-        if (web != null && !web.hasFocus()) {
+        if (directEmbedMode) {
+            if (rootOverlay != null && !rootOverlay.hasFocus()) {
+                rootOverlay.requestFocus();
+            }
+        } else if (web != null && !web.hasFocus()) {
             web.requestFocus();
         }
     }
@@ -856,6 +888,14 @@ public final class WatchActivity extends Activity {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
                 progress.setVisibility(View.VISIBLE);
+                if (!directEmbedMode) {
+                    pageCommitted = true;
+                } else if (url != null && !"about:blank".equals(url)) {
+                    String host = Uri.parse(url).getHost();
+                    if (host != null && (expectedEmbedHost.isEmpty() || host.equalsIgnoreCase(expectedEmbedHost))) {
+                        pageCommitted = true;
+                    }
+                }
                 view.evaluateJavascript(earlyAntiPopupScript(), null);
             }
 
@@ -954,26 +994,45 @@ public final class WatchActivity extends Activity {
 
     private void pollVideoState() {
         if (isFinishing() || web == null) return;
+        final int gen = loadGeneration;
+        if (directEmbedMode && !pageCommitted) {
+            long elapsed = SystemClock.elapsedRealtime() - serverLoadStartedMs;
+            if (SiteConfig.STALL_TIMEOUT_MS > 0 && elapsed > SiteConfig.STALL_TIMEOUT_MS
+                    && currentEmbedTemplates().length > 1) {
+                Log.w(TAG, "STALL_DETECTED server=" + serverLabel(currentServerIndex)
+                        + " elapsed=" + elapsed + "ms uncommitted");
+                switchToNextServer(true);
+                return;
+            }
+            handler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL_MS);
+            return;
+        }
+
         String focusSel = SiteConfig.PLAYER_FOCUS_SELECTOR == null ? "" : SiteConfig.PLAYER_FOCUS_SELECTOR;
+        String hideChromeSnippet = (directEmbedMode && SiteConfig.HIDE_DIRECT_EMBED_CHROME)
+                ? ("if(v.readyState>=2){" + hideDirectEmbedChromeBody() + "}") : "";
         String js = "(function(){"
                 + "var vids=document.querySelectorAll('video');"
                 + "var v=null;"
                 + "for(var i=0;i<vids.length;i++){if(vids[i].readyState>0||vids[i].currentSrc){v=vids[i];break;}}"
                 + "if(!v&&vids.length>0)v=vids[0];"
-                + "if(!v)return JSON.stringify({found:false});"
+                + "var host=location.hostname||'';"
+                + "if(!v)return JSON.stringify({found:false,host:host});"
+                + hideChromeSnippet
                 + "if(" + (SiteConfig.AUTO_UNMUTE ? "true" : "false") + "&&!" + (userMuted ? "true" : "false") + "&&v.muted){"
                 + "  try{v.muted=false;v.volume=1;}catch(e){}"
                 + "}"
                 + "if(!" + (userPaused ? "true" : "false") + "&&v.paused&&v.readyState>=2){"
                 + "  try{var p=v.play();if(p&&p.catch)p.catch(function(){});}catch(e){}"
                 + "}"
-                + "return JSON.stringify({found:true,rs:v.readyState,ct:v.currentTime||0,dur:isFinite(v.duration)?v.duration:0,"
+                + "return JSON.stringify({found:true,host:host,rs:v.readyState,ct:v.currentTime||0,dur:isFinite(v.duration)?v.duration:0,"
                 + "paused:!!v.paused,muted:!!v.muted,vw:v.videoWidth||0,vh:v.videoHeight||0});"
                 + "})()";
 
         web.evaluateJavascript(js, result -> {
-            if (isFinishing() || web == null) return;
+            if (isFinishing() || web == null || gen != loadGeneration) return;
             boolean found = false;
+            String host = "";
             int rs = 0;
             double ct = 0;
             double dur = 0;
@@ -987,6 +1046,7 @@ public final class WatchActivity extends Activity {
                     String unquoted = new JSONObject("{data:" + result + "}").getString("data");
                     JSONObject obj = new JSONObject(unquoted);
                     found = obj.optBoolean("found", false);
+                    host = obj.optString("host", "");
                     rs = obj.optInt("rs", 0);
                     ct = obj.optDouble("ct", 0);
                     dur = obj.optDouble("dur", 0);
@@ -996,6 +1056,11 @@ public final class WatchActivity extends Activity {
                     vh = obj.optInt("vh", 0);
                 } catch (Exception ignored) {
                 }
+            }
+
+            if (directEmbedMode && !expectedEmbedHost.isEmpty() && !host.equalsIgnoreCase(expectedEmbedHost)) {
+                handler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL_MS);
+                return;
             }
 
             videoCurrentlyPaused = paused;
@@ -1021,6 +1086,7 @@ public final class WatchActivity extends Activity {
                     playbackStarted = true;
                     hideLoadingOverlay();
                     Log.i(TAG, "PLAYBACK_STARTED server=" + serverLabel(currentServerIndex)
+                            + " gen=" + gen
                             + " ct=" + String.format(Locale.US, "%.1f", ct)
                             + " dur=" + String.format(Locale.US, "%.0f", dur)
                             + " res=" + vw + "x" + vh + " muted=" + muted);
@@ -1028,7 +1094,6 @@ public final class WatchActivity extends Activity {
                 }
             } else if (!playbackStarted && directEmbedMode) {
                 long elapsed = SystemClock.elapsedRealtime() - serverLoadStartedMs;
-                // Try clicking the player's play button once after 3.5s if video exists but stayed paused
                 if (elapsed > 3500 && playClickAttempts < 2 && !focusSel.isEmpty()) {
                     playClickAttempts++;
                     web.evaluateJavascript("(function(){var b=document.querySelector("
@@ -1039,11 +1104,39 @@ public final class WatchActivity extends Activity {
                     Log.w(TAG, "STALL_DETECTED server=" + serverLabel(currentServerIndex)
                             + " elapsed=" + elapsed + "ms rs=" + rs + " ct=" + ct);
                     switchToNextServer(true);
+                    return;
                 }
             }
 
             handler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL_MS);
         });
+    }
+
+    private static String hideDirectEmbedChromeBody() {
+        String capSel = SiteConfig.PLAYER_CAPTION_SELECTOR == null ? "" : SiteConfig.PLAYER_CAPTION_SELECTOR;
+        return "try{"
+                + "v.controls=false;"
+                + "var capSel=" + jsQuote(capSel) + ";"
+                + "function hideNonCap(el){"
+                + "  if(!el||el.nodeType!==1)return;"
+                + "  var t=el.tagName;"
+                + "  if(t==='STYLE'||t==='SCRIPT'||t==='LINK'||t==='VIDEO')return;"
+                + "  if(capSel&&el.matches&&el.matches(capSel))return;"
+                + "  if(capSel&&el.querySelector&&el.querySelector(capSel)){"
+                + "    for(var k=0;k<el.children.length;k++)hideNonCap(el.children[k]);"
+                + "    return;"
+                + "  }"
+                + "  el.style.setProperty('display','none','important');"
+                + "  el.style.setProperty('visibility','hidden','important');"
+                + "  el.style.setProperty('opacity','0','important');"
+                + "}"
+                + "var cur=v;"
+                + "while(cur&&cur!==document.body&&cur!==document.documentElement){"
+                + "  var p=cur.parentElement;"
+                + "  if(p){for(var j=0;j<p.children.length;j++){if(p.children[j]!==cur)hideNonCap(p.children[j]);}}"
+                + "  cur=p;"
+                + "}"
+                + "}catch(e){}";
     }
 
     private static String formatTime(double seconds) {
@@ -1149,6 +1242,12 @@ public final class WatchActivity extends Activity {
                     videoCurrentlyPaused = false;
                     if (pauseButton != null) pauseButton.setText("Ⅱ\nPAUSE");
                 }
+                if (SiteConfig.HIDE_DIRECT_EMBED_CHROME) {
+                    String hideJs = "(function(){var v=document.querySelector('video');if(v){"
+                            + hideDirectEmbedChromeBody() + "}})()";
+                    handler.postDelayed(() -> { if (!isFinishing() && web != null) web.evaluateJavascript(hideJs, null); }, 80);
+                    handler.postDelayed(() -> { if (!isFinishing() && web != null) web.evaluateJavascript(hideJs, null); }, 300);
+                }
             });
             return;
         }
@@ -1193,7 +1292,8 @@ public final class WatchActivity extends Activity {
         String focus = SiteConfig.PLAYER_FOCUS_SELECTOR == null ? "" : SiteConfig.PLAYER_FOCUS_SELECTOR;
         StringBuilder css = new StringBuilder()
                 .append("html,body{margin:0!important;padding:0!important;overflow:hidden!important;")
-                .append("background:#0a0c12!important;width:100%!important;height:100%!important;}");
+                .append("background:#0a0c12!important;width:100%!important;height:100%!important;}")
+                .append("*:focus,*:focus-visible{outline:none!important;box-shadow:none!important;}");
         if (!hide.isEmpty()) {
             css.append(hide).append("{display:none!important;}");
         }

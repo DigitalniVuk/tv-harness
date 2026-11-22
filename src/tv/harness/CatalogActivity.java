@@ -9,6 +9,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.os.Bundle;
+import android.text.InputType;
 import android.util.LruCache;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -16,6 +17,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
@@ -345,17 +347,18 @@ public final class CatalogActivity extends Activity {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(30), dp(8), dp(30), dp(14));
+        bar.setPadding(dp(30), dp(2), dp(30), dp(4));
 
         EditText input = new EditText(this);
         input.setText(lastQuery);
         input.setHint("Type movie or show title…");
         input.setHintTextColor(MUTED);
         input.setTextColor(WHITE);
-        input.setTextSize(16);
+        input.setTextSize(15);
         input.setSingleLine(true);
-        input.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
-        input.setPadding(dp(16), dp(10), dp(16), dp(10));
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        input.setImeOptions(EditorInfo.IME_ACTION_SEARCH | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        input.setPadding(dp(14), dp(8), dp(14), dp(8));
         GradientDrawable inputBg = new GradientDrawable();
         inputBg.setColor(CARD);
         inputBg.setCornerRadius(dp(10));
@@ -363,14 +366,19 @@ public final class CatalogActivity extends Activity {
         input.setBackground(inputBg);
         input.setOnEditorActionListener((v, actionId, event) -> {
             if (actionId == EditorInfo.IME_ACTION_SEARCH
-                    || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
+                    || actionId == EditorInfo.IME_ACTION_DONE
+                    || actionId == EditorInfo.IME_ACTION_GO
+                    || (event != null && event.getAction() == KeyEvent.ACTION_DOWN
+                    && (event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                    || event.getKeyCode() == KeyEvent.KEYCODE_DPAD_CENTER))) {
+                hideKeyboard(v);
                 runSearch(input.getText().toString());
                 return true;
             }
             return false;
         });
 
-        LinearLayout.LayoutParams inputLp = new LinearLayout.LayoutParams(dp(440), dp(48));
+        LinearLayout.LayoutParams inputLp = new LinearLayout.LayoutParams(dp(440), dp(44));
         inputLp.rightMargin = dp(12);
         bar.addView(input, inputLp);
 
@@ -378,14 +386,25 @@ public final class CatalogActivity extends Activity {
         go.setGravity(Gravity.CENTER);
         go.setFocusable(true);
         go.setBackground(buttonBackground(Color.rgb(55, 45, 95), ACCENT));
-        go.setOnClickListener(v -> runSearch(input.getText().toString()));
-        bar.addView(go, new LinearLayout.LayoutParams(dp(120), dp(48)));
+        go.setOnClickListener(v -> {
+            hideKeyboard(input);
+            runSearch(input.getText().toString());
+        });
+        bar.addView(go, new LinearLayout.LayoutParams(dp(120), dp(44)));
 
         content.addView(bar);
-        if (firstContentFocus == null) firstContentFocus = input;
 
         if (!searchResults.isEmpty()) {
-            addSection("SEARCH RESULTS", searchResults);
+            addSection("SEARCH RESULTS", searchResults, true);
+        }
+        if (firstContentFocus == null) firstContentFocus = input;
+    }
+
+    private void hideKeyboard(View v) {
+        try {
+            InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null && v != null) imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
+        } catch (Exception ignored) {
         }
     }
 
@@ -421,9 +440,13 @@ public final class CatalogActivity extends Activity {
     }
 
     private void addSection(String heading, List<CatalogItem> all) {
+        addSection(heading, all, false);
+    }
+
+    private void addSection(String heading, List<CatalogItem> all, boolean compact) {
         if (all.isEmpty()) return;
-        TextView title = text(heading, 17, WHITE, true);
-        title.setPadding(dp(30), dp(10), dp(30), dp(8));
+        TextView title = text(heading, compact ? 15 : 17, WHITE, true);
+        title.setPadding(dp(30), dp(compact ? 6 : 10), dp(30), dp(compact ? 4 : 8));
         content.addView(title, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         HorizontalScrollView row = new HorizontalScrollView(this);
@@ -431,30 +454,31 @@ public final class CatalogActivity extends Activity {
         row.setOverScrollMode(View.OVER_SCROLL_NEVER);
         row.setClipChildren(false);
         row.setClipToPadding(false);
-        row.setPadding(dp(26), dp(6), dp(26), dp(12));
+        row.setPadding(dp(26), dp(compact ? 4 : 6), dp(26), dp(compact ? 8 : 12));
         LinearLayout cards = new LinearLayout(this);
         cards.setOrientation(LinearLayout.HORIZONTAL);
         cards.setClipChildren(false);
         cards.setClipToPadding(false);
         int count = Math.min(MAX_CARDS, all.size());
         for (int i = 0; i < count; i++) {
-            View tile = card(all.get(i), i < 8);
+            View tile = card(all.get(i), i < 8, compact);
             if (firstContentFocus == null) firstContentFocus = tile;
-            cards.addView(tile, cardParams());
+            cards.addView(tile, cardParams(compact));
         }
         row.addView(cards, new HorizontalScrollView.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         content.addView(row, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(348)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(compact ? 290 : 348)));
     }
 
-    private LinearLayout.LayoutParams cardParams() {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(194), dp(324));
+    private LinearLayout.LayoutParams cardParams(boolean compact) {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                dp(compact ? 172 : 194), dp(compact ? 272 : 324));
         p.rightMargin = dp(14);
         return p;
     }
 
-    private View card(CatalogItem item, boolean preload) {
+    private View card(CatalogItem item, boolean preload, boolean compact) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setFocusable(true);
@@ -465,25 +489,25 @@ public final class CatalogActivity extends Activity {
         poster.setBackgroundColor(Color.rgb(38, 44, 58));
         poster.setTag(item.posterUrl);
         card.addView(poster, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(246)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(compact ? 198 : 246)));
         card.setOnFocusChangeListener((v, focused) -> {
             v.animate().scaleX(focused ? 1.04f : 1f).scaleY(focused ? 1.04f : 1f)
                     .setDuration(110).start();
             if (focused) loadPoster(item.posterUrl, poster);
         });
         card.setOnClickListener(v -> open(item));
-        TextView name = text(item.title, 14, WHITE, true);
+        TextView name = text(item.title, compact ? 13 : 14, WHITE, true);
         name.setMaxLines(2);
         name.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        name.setPadding(dp(10), dp(8), dp(10), 0);
+        name.setPadding(dp(10), dp(compact ? 6 : 8), dp(10), 0);
         card.addView(name, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(46)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(compact ? 42 : 46)));
         TextView meta = text(item.details, 11, MUTED, false);
         meta.setMaxLines(1);
         meta.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        meta.setPadding(dp(10), dp(2), dp(10), dp(6));
+        meta.setPadding(dp(10), dp(2), dp(10), dp(compact ? 4 : 6));
         card.addView(meta, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(26)));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(compact ? 24 : 26)));
         if (preload) loadPoster(item.posterUrl, poster);
         card.setContentDescription(item.title + ", " + item.details);
         return card;
