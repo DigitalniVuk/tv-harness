@@ -161,9 +161,16 @@ code to do it. Upstream candidates (in priority order):
       `docs/INVESTIGATION.md` + `docs/ISSUES.md`
 - [x] Backport of generic fixes: empty-selector guards, focus watcher
       window (~4 min + scrollIntoView), episode-button hiding
-- [x] Direct-embed + stuck-media watchdog proven in the fork
-      (config-driven, needs upstreaming as generic code)
+- [x] Direct-embed + stuck-media watchdog upstreamed as generic code
+      (`DIRECT_EMBED_*`, generation-gated `WatchActivity` watchdog,
+      auto-unmute, recursive web-overlay chrome hiding, media-key OSD focus,
+      API 26+ WebView focus-outline suppression)
+- [x] JSON API catalogue mode, optional native `DetailActivity` (with TV
+      season/episode pickers), scrollable tab bar, native Search UI, and
+      hardened `AdBlocker` (`BLOCKED_URL_SUBSTRINGS`, `STRICT_MAIN_FRAME_ALLOWLIST`,
+      `EXTRA_BLOCKED_DOMAINS`, `BLOCKED_TLDS`, `ALLOWED_SUBRESOURCE_HOSTS`)
 - [x] Field-notes playbook in `AGENT_GUIDE.md` (RSC traps, direct-embed
       pattern, watchdog, sound, geo-gate checklist, fork discipline)
-- [ ] Phase 4 upstream tasks above (RSC JSON mode, direct-embed generic
-      code, control seam, tab-row)
+- [ ] Remaining Phase 4 tasks (RSC flight-data JSON mode, generic HTML
+      `<select>` control seam, non-`<div>` item blocks, debug build path,
+      fixture tests)

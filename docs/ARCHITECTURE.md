@@ -32,12 +32,13 @@ no-cache headers and run off the UI thread.
 | Component | Responsibility |
 | --- | --- |
 | `SiteConfig` | **The only site-specific file.** Endpoints, item selectors, player hooks, host allowlists. Edit only this to plug in a website (see `docs/AGENT_GUIDE.md`). |
-| `CatalogActivity` | Catalogue UI, remote navigation, refresh, poster loading, opening playback. Tabs from `SiteConfig`. |
-| `CatalogScraper` | Site-agnostic HTTPS fetching and HTML extraction. |
-| `CatalogItem` | Title, item URL, poster URL, details. |
+| `CatalogActivity` | Catalogue UI, scrollable tab bar, optional native search, remote navigation, refresh, poster loading. Tabs from `SiteConfig`. |
+| `DetailActivity` | Optional native TV detail screen (`SiteConfig.SHOW_DETAIL_SCREEN`) with poster, backdrop, overview, Play CTA, and TV season/episode pickers. |
+| `CatalogScraper` | Site-agnostic HTTPS fetching and HTML or JSON API extraction (with 429 retry and deduplication). |
+| `CatalogItem` | Title, item URL, poster/backdrop URLs, details, media ID/type, overview. |
 | `CatalogCategory` | Category label and path. |
-| `WatchActivity` | WebView playback and native player controls, driven by `SiteConfig` selectors. |
-| `AdBlocker` | Ad domain/URL checks for WebView requests; first-party hosts from `SiteConfig`. |
+| `WatchActivity` | WebView playback, direct-embed server failover, generation-gated `<video>` watchdog, chrome hiding, and native remote OSD. |
+| `AdBlocker` | Ad domain/TLD/URL-substring checks, strict main-frame allowlisting, and subresource CDN allowlisting from `SiteConfig`. |
 | `App` | Process-level application context for bundled filter loading. |
 
 ## Boundaries

@@ -11,17 +11,24 @@ website by editing only that file, following `docs/AGENT_GUIDE.md`.
 
 ## Features
 
-- Config-driven catalogue tabs (any listing pages) with native TV cards and
-  remote navigation.
-- Category browsing discovered from the site's own links.
+- Config-driven catalogue tabs (HTML scraping or JSON API mode) with native
+  TV cards, scrollable tab bar, optional native search, and remote navigation.
+- Optional native detail screen (`DetailActivity`) with poster/backdrop,
+  overview, auto-focused Play CTA, and TV season/episode pickers.
+- Category browsing discovered from the site's own links or JSON genre API.
 - Poster loading on background workers with an in-memory bitmap cache.
-- WebView player screen with native, focusable remote controls (pause,
-  prev/next, episode/section picker, autoplay, reload, browse).
-- Pop-up and ad request blocking using a small EasyList-derived domain list
-  plus URL checks; known media file paths are always allowed through.
+- WebView player screen with native, focusable remote controls (pause/play,
+  seek, prev/next, episode picker, sound toggle, server switcher, reload, back),
+  optional direct-embed server failover, generation-gated stuck-media watchdog,
+  and automatic web-overlay chrome hiding.
+- Pop-up, redirect, and ad request blocking using an EasyList-derived domain
+  list plus strict main-frame host allowlisting, unconditional URL-substring
+  blocks (e.g. anti-devtool scripts), extra blocked domains/TLDs, and a
+  subresource-only CDN allowlist (`ALLOWED_SUBRESOURCE_HOSTS`); known media
+  file paths are always allowed through.
 - Catalogue refresh that bypasses HTTP caches and clears the poster cache.
 - Config-driven player page customisation (hide site chrome, centre the
-  site's own player in 16:9).
+  site's own player in 16:9, suppress WebView focus outlines).
 
 ## Requirements
 
@@ -64,9 +71,11 @@ the installed app and its data.
   Endpoints, selectors, player hooks, host allowlists. Edit this to plug in
   a website.
 - `src/tv/harness/CatalogActivity.java` — native TV catalogue, remote
-  navigation, poster loading. Site-agnostic; tabs come from `SiteConfig`.
-- `src/tv/harness/CatalogScraper.java` — site-agnostic HTML fetcher/parser
-  (selectors and endpoints come from `SiteConfig`).
+  navigation, optional search, poster loading. Site-agnostic; tabs come from `SiteConfig`.
+- `src/tv/harness/DetailActivity.java` — optional native TV detail screen
+  (poster, backdrop, overview, Play button, TV season/episode pickers).
+- `src/tv/harness/CatalogScraper.java` — site-agnostic HTTPS fetcher/parser
+  supporting HTML blocks and JSON API endpoints (all config from `SiteConfig`).
 - `src/tv/harness/CatalogItem.java`, `CatalogCategory.java` — data records.
 - `src/tv/harness/WatchActivity.java` — WebView playback screen and native
   remote controls, driven by `SiteConfig` player selectors.
