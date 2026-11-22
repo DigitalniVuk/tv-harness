@@ -1,6 +1,5 @@
 package tv.harness;
 
-import android.content.Context;
 import android.net.Uri;
 
 import java.io.BufferedReader;
@@ -12,29 +11,43 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * Lightweight EasyList domain filter with a few media-safe URL checks.
- * First-party hosts come from {@link SiteConfig}; this class is
- * site-agnostic and must not gain any site names.
+ * Lightweight EasyList domain filter with media-safe URL checks and
+ * config-driven anti-popup/anti-redirect rules. First-party hosts and extra
+ * rules come from {@link SiteConfig}; this class is site-agnostic.
  */
 final class AdBlocker {
-    private static String[] FIRST_PARTY = SiteConfig.FIRST_PARTY_HOSTS;
+    private static final String[] FIRST_PARTY = SiteConfig.FIRST_PARTY_HOSTS;
+    private static final String[] ALLOWED_SUBRESOURCES = lowercaseArray(SiteConfig.ALLOWED_SUBRESOURCE_HOSTS);
+    private static final String[] BLOCKED_TLDS = lowercaseArray(SiteConfig.BLOCKED_TLDS);
+    private static final String[] BLOCKED_SUBSTRINGS = lowercaseArray(SiteConfig.BLOCKED_URL_SUBSTRINGS);
     private static final Set<String> DOMAINS = loadDomains();
 
     private AdBlocker() {}
 
+    static boolean isFirstPartyHost(String rawUrl) {
+        String host = extractHost(rawUrl);
+        if (host == null) return false;
+        return matchesFirstParty(host);
+    }
+
     static boolean blocks(String rawUrl) {
         if (rawUrl == null) return false;
 
-        // Performance optimization: Fast-path URL parsing without allocating android.net.Uri objects.
-        // During playback, WebView intercepts dozens of subresource requests (scripts, images, media, beacons).
-        // Standard Uri.parse() allocates multiple intermediate objects and performs heavyweight URI validation.
-        // By fast-checking scheme and index-scanning host and path directly, we reduce check overhead by ~4.6x
-        // and eliminate allocations on the request interception path.
+        // Non-HTTP URLs (e.g. data:, javascript:, about:, blob:) are never ad-blocked
         boolean isHttp = rawUrl.regionMatches(true, 0, "http" + "://", 0, 7);
         boolean isHttps = !isHttp && rawUrl.regionMatches(true, 0, "https" + "://", 0, 8);
         if (!isHttp && !isHttps) {
-            // Non-HTTP URLs (e.g. data:, javascript:, about:, blob:) are never ad-blocked
             return false;
+        }
+
+        // Unconditional substring blocks run before FIRST_PARTY_HOSTS so
+        // anti-devtool redirect scripts or push-ad service workers on allowed
+        // hosts are still neutralized.
+        if (BLOCKED_SUBSTRINGS.length > 0) {
+            String lowerUrl = rawUrl.toLowerCase(Locale.ROOT);
+            for (String token : BLOCKED_SUBSTRINGS) {
+                if (!token.isEmpty() && lowerUrl.contains(token)) return true;
+            }
         }
 
         int schemeLen = isHttp ? 7 : 8;
@@ -60,14 +73,12 @@ final class AdBlocker {
             hostEnd = colon;
         }
         if (hostStart >= hostEnd) {
-            // Malformed or empty host, fallback to Uri.parse for safety
             return blocksFallback(rawUrl);
         }
 
         String host = rawUrl.substring(hostStart, hostEnd).toLowerCase(Locale.ROOT);
-        for (String allowed : FIRST_PARTY) {
-            if (host.equals(allowed) || host.endsWith("." + allowed)) return false;
-        }
+        if (matchesFirstParty(host)) return false;
+        if (matchesAllowedSubresource(host)) return false;
 
         String path = "";
         if (slash != -1) {
@@ -83,10 +94,9 @@ final class AdBlocker {
         }
 
         if (isMediaPath(path)) return false;
+        if (hasBlockedTld(host)) return true;
         if (hasDomainRule(host)) return true;
-        return path.contains("/adservice/") || path.contains("/adserver/")
-                || path.contains("/popunder/") || path.contains("/clickunder/")
-                || path.contains("/advertisement/") || path.contains("/banner-ad/");
+        return hasBlockedPath(path);
     }
 
     private static boolean blocksFallback(String rawUrl) {
@@ -101,12 +111,51 @@ final class AdBlocker {
         String host = uri.getHost();
         if (host == null) return false;
         host = host.toLowerCase(Locale.ROOT);
-        for (String allowed : FIRST_PARTY) {
-            if (host.equals(allowed) || host.endsWith("." + allowed)) return false;
-        }
+        if (matchesFirstParty(host)) return false;
+        if (matchesAllowedSubresource(host)) return false;
         String path = uri.getPath() == null ? "" : uri.getPath().toLowerCase(Locale.ROOT);
         if (isMediaPath(path)) return false;
+        if (hasBlockedTld(host)) return true;
         if (hasDomainRule(host)) return true;
+        return hasBlockedPath(path);
+    }
+
+    private static String extractHost(String rawUrl) {
+        if (rawUrl == null) return null;
+        try {
+            Uri uri = Uri.parse(rawUrl);
+            String host = uri.getHost();
+            return host == null ? null : host.toLowerCase(Locale.ROOT);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static boolean matchesFirstParty(String host) {
+        for (String allowed : FIRST_PARTY) {
+            if (allowed == null || allowed.isEmpty()) continue;
+            String a = allowed.toLowerCase(Locale.ROOT);
+            if (host.equals(a) || host.endsWith("." + a)) return true;
+        }
+        return false;
+    }
+
+    private static boolean matchesAllowedSubresource(String host) {
+        for (String allowed : ALLOWED_SUBRESOURCES) {
+            if (allowed == null || allowed.isEmpty()) continue;
+            if (host.equals(allowed) || host.endsWith("." + allowed)) return true;
+        }
+        return false;
+    }
+
+    private static boolean hasBlockedTld(String host) {
+        for (String tld : BLOCKED_TLDS) {
+            if (!tld.isEmpty() && host.endsWith("." + tld)) return true;
+        }
+        return false;
+    }
+
+    private static boolean hasBlockedPath(String path) {
         return path.contains("/adservice/") || path.contains("/adserver/")
                 || path.contains("/popunder/") || path.contains("/clickunder/")
                 || path.contains("/advertisement/") || path.contains("/banner-ad/");
@@ -130,11 +179,16 @@ final class AdBlocker {
         return false;
     }
 
+    private static String[] lowercaseArray(String[] input) {
+        if (input == null || input.length == 0) return new String[0];
+        String[] out = new String[input.length];
+        for (int i = 0; i < input.length; i++) {
+            out[i] = input[i] == null ? "" : input[i].trim().toLowerCase(Locale.ROOT);
+        }
+        return out;
+    }
+
     private static Set<String> loadDomains() {
-        // Performance optimization: Pre-allocate initial capacity for ~47,500 entries in
-        // assets/blocking-domains.txt. With default load factor of 0.75, capacity 65536
-        // holds up to 49152 entries without table resizing and rehashing (saving ~12 resize cycles).
-        // Larger 32KB buffer reduces I/O read calls.
         Set<String> out = new HashSet<>(65536);
         try (InputStream stream = App.context().getAssets().open("blocking-domains.txt");
              BufferedReader reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"), 32768)) {
@@ -145,12 +199,20 @@ final class AdBlocker {
                 if (!line.isEmpty() && line.charAt(0) != '#') out.add(line);
             }
         } catch (Exception ignored) {
-            // The targeted rules below still block common pop-up ad paths if the list is absent.
+            // Targeted rules below still block common pop-up ad hosts if the list is absent.
         }
         Collections.addAll(out, "doubleclick.net", "googlesyndication.com",
                 "googleadservices.com", "adservice.google.com", "popads.net",
                 "popcash.net", "exoclick.com", "trafficjunky.net", "propellerads.com",
                 "juicyads.com", "clickadu.com", "adsterra.com");
+        if (SiteConfig.EXTRA_BLOCKED_DOMAINS != null) {
+            for (String d : SiteConfig.EXTRA_BLOCKED_DOMAINS) {
+                if (d != null) {
+                    String clean = d.trim().toLowerCase(Locale.ROOT);
+                    if (!clean.isEmpty()) out.add(clean);
+                }
+            }
+        }
         return Collections.unmodifiableSet(out);
     }
 }
