@@ -14,9 +14,18 @@ website by editing only that file, following `docs/AGENT_GUIDE.md`.
 - Config-driven catalogue tabs (HTML scraping or JSON API mode) with native
   TV cards, scrollable tab bar, optional native search, and remote navigation.
 - Optional native detail screen (`DetailActivity`) with poster/backdrop,
-  overview, auto-focused Play CTA, and TV season/episode pickers.
+  overview, Resume / Start Over / Play CTA, watch-history removal, and TV
+  season/episode pickers with progress indicators.
+- Local watch history (`WatchHistoryStore`) with a **Continue Watching** shelf
+  at the top of `HOME`, a dedicated **`RECENT`** tab (`Continue Watching` +
+  `Recently Watched` + `Clear Watch History`), and HLS-resilient auto-resume.
+- Native **Subtitles (CC)** engine (`SubtitleEngine`) with a top-bar `CC`
+  selector sheet, 1080p native caption overlay (lifting cleanly above the OSD),
+  WebVTT/SRT parsing, configurable external subtitle API templates, HTML5
+  `textTracks` fallback, and preferred-language persistence.
 - Category browsing discovered from the site's own links or JSON genre API.
-- Poster loading on background workers with an in-memory bitmap cache.
+- Poster loading on background workers with an in-memory bitmap cache and
+  in-flight multi-target fan-out for titles shown on multiple shelves.
 - WebView player screen with native, focusable remote controls (pause/play,
   seek, prev/next, episode picker, sound toggle, server switcher, reload, back),
   optional direct-embed server failover, generation-gated stuck-media watchdog,
@@ -77,8 +86,13 @@ the installed app and its data.
 - `src/tv/harness/CatalogScraper.java` — site-agnostic HTTPS fetcher/parser
   supporting HTML blocks and JSON API endpoints (all config from `SiteConfig`).
 - `src/tv/harness/CatalogItem.java`, `CatalogCategory.java` — data records.
-- `src/tv/harness/WatchActivity.java` — WebView playback screen and native
-  remote controls, driven by `SiteConfig` player selectors.
+- `src/tv/harness/WatchActivity.java` — WebView playback screen, native remote
+  controls, HLS-resilient auto-resume, and native 1080p subtitle overlay,
+  driven by `SiteConfig` player selectors.
+- `src/tv/harness/WatchHistoryStore.java` — local `SharedPreferences` + JSON
+  persistence for Continue Watching, Recently Watched, and subtitle preference.
+- `src/tv/harness/SubtitleEngine.java` — site-agnostic subtitle track discovery
+  and WebVTT/SRT cue parser with binary-search active-cue lookup.
 - `src/tv/harness/AdBlocker.java` — ad domain/URL checks; first-party hosts
   come from `SiteConfig`.
 - `assets/blocking-domains.txt` — bundled domain rules (see `assets/NOTICE.txt`).
