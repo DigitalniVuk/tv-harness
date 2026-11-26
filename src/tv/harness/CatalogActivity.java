@@ -29,13 +29,14 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.InputStream;
+import java.lang.ref.WeakReference;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -61,7 +62,7 @@ public final class CatalogActivity extends Activity {
             return Math.max(1, value.getByteCount() / 1024);
         }
     };
-    private final Set<String> loadingImages = Collections.synchronizedSet(new HashSet<>());
+    private final Map<String, List<WeakReference<ImageView>>> pendingImageTargets = new HashMap<>();
     private final java.util.Map<String, List<CatalogItem>> tabItems = new java.util.LinkedHashMap<>();
     private final List<CatalogItem> categoryItems = new ArrayList<>();
     private final List<CatalogItem> searchResults = new ArrayList<>();
@@ -680,7 +681,7 @@ public final class CatalogActivity extends Activity {
     }
 
     private void loadPoster(String url, ImageView target) {
-        if (url == null) return;
+        if (url == null || target == null) return;
         boolean allowed = false;
         for (String prefix : SiteConfig.ALLOWED_IMAGE_PREFIXES) {
             if (url.startsWith(prefix)) { allowed = true; break; }
@@ -691,9 +692,26 @@ public final class CatalogActivity extends Activity {
             target.setImageBitmap(cached);
             return;
         }
-        if (!loadingImages.add(url)) return;
+        boolean startDownload = false;
+        synchronized (pendingImageTargets) {
+            // Re-check cache inside lock to avoid racing a just-finished worker
+            Bitmap cachedNow = images.get(url);
+            if (cachedNow != null) {
+                target.setImageBitmap(cachedNow);
+                return;
+            }
+            List<WeakReference<ImageView>> waiters = pendingImageTargets.get(url);
+            if (waiters == null) {
+                waiters = new ArrayList<>();
+                pendingImageTargets.put(url, waiters);
+                startDownload = true;
+            }
+            waiters.add(new WeakReference<>(target));
+        }
+        if (!startDownload) return;
         imageWorkers.execute(() -> {
             HttpURLConnection connection = null;
+            Bitmap decoded = null;
             try {
                 connection = (HttpURLConnection) new URL(url).openConnection();
                 connection.setUseCaches(false);
@@ -704,18 +722,29 @@ public final class CatalogActivity extends Activity {
                 try (InputStream in = connection.getInputStream()) {
                     BitmapFactory.Options options = new BitmapFactory.Options();
                     options.inSampleSize = 1;
-                    Bitmap bitmap = BitmapFactory.decodeStream(in, null, options);
-                    if (bitmap != null) {
-                        images.put(url, bitmap);
-                        runOnUiThread(() -> {
-                            if (url.equals(target.getTag())) target.setImageBitmap(bitmap);
-                        });
-                    }
+                    decoded = BitmapFactory.decodeStream(in, null, options);
                 }
             } catch (Exception ignored) {
             } finally {
                 if (connection != null) connection.disconnect();
-                loadingImages.remove(url);
+                List<WeakReference<ImageView>> waiters;
+                synchronized (pendingImageTargets) {
+                    if (decoded != null) images.put(url, decoded);
+                    waiters = pendingImageTargets.remove(url);
+                }
+                if (decoded != null && waiters != null) {
+                    final Bitmap bmp = decoded;
+                    final List<WeakReference<ImageView>> targets = waiters;
+                    runOnUiThread(() -> {
+                        if (isFinishing()) return;
+                        for (WeakReference<ImageView> ref : targets) {
+                            ImageView iv = ref.get();
+                            if (iv != null && url.equals(iv.getTag())) {
+                                iv.setImageBitmap(bmp);
+                            }
+                        }
+                    });
+                }
             }
         });
     }
