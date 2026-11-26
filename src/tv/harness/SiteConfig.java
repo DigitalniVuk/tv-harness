@@ -57,6 +57,9 @@ public final class SiteConfig {
     /** When true, clicking a catalogue card opens native DetailActivity before WatchActivity. */
     public static final boolean SHOW_DETAIL_SCREEN = false;
 
+    /** Persist watch history, Continue Watching, and Recently Watched locally. */
+    public static final boolean ENABLE_WATCH_HISTORY = true;
+
     public static final class Tab {
         final String id;
         final String label;
@@ -220,6 +223,14 @@ public final class SiteConfig {
 
     /** Automatically unmute HTML5 <video> when playback begins. */
     public static final boolean AUTO_UNMUTE = true;
+
+    /**
+     * Optional external subtitle JSON API templates supporting {id}, {season},
+     * {episode}. When empty, WatchActivity falls back to inspecting HTML5 /
+     * media-player textTracks in the player page.
+     */
+    public static final String[] SUBTITLE_API_MOVIE_URLS = {};
+    public static final String[] SUBTITLE_API_TV_URLS = {};
 
     // ------------------------------------------------------------------
     // Host allowlists & blocking rules (also feed AdBlocker)

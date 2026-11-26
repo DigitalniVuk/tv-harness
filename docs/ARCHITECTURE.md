@@ -32,12 +32,14 @@ no-cache headers and run off the UI thread.
 | Component | Responsibility |
 | --- | --- |
 | `SiteConfig` | **The only site-specific file.** Endpoints, item selectors, player hooks, host allowlists. Edit only this to plug in a website (see `docs/AGENT_GUIDE.md`). |
-| `CatalogActivity` | Catalogue UI, scrollable tab bar, optional native search, remote navigation, refresh, poster loading. Tabs from `SiteConfig`. |
-| `DetailActivity` | Optional native TV detail screen (`SiteConfig.SHOW_DETAIL_SCREEN`) with poster, backdrop, overview, Play CTA, and TV season/episode pickers. |
+| `CatalogActivity` | Catalogue UI, scrollable tab bar, Continue Watching shelf, `RECENT` tab, optional native search, remote navigation, refresh, multi-target fan-out poster loading. Tabs from `SiteConfig`. |
+| `DetailActivity` | Optional native TV detail screen (`SiteConfig.SHOW_DETAIL_SCREEN`) with poster, backdrop, overview, Resume / Start Over / Play CTA, and TV season/episode pickers with progress indicators. |
 | `CatalogScraper` | Site-agnostic HTTPS fetching and HTML or JSON API extraction (with 429 retry and deduplication). |
 | `CatalogItem` | Title, item URL, poster/backdrop URLs, details, media ID/type, overview. |
 | `CatalogCategory` | Category label and path. |
-| `WatchActivity` | WebView playback, direct-embed server failover, generation-gated `<video>` watchdog, chrome hiding, and native remote OSD. |
+| `WatchHistoryStore` | Local `SharedPreferences` + JSON persistence for watch progress, Continue Watching, Recently Watched, and preferred subtitle language. |
+| `SubtitleEngine` | Site-agnostic subtitle API track discovery, language normalization/deduplication, and WebVTT/SRT cue parser with binary-search lookup. |
+| `WatchActivity` | WebView playback, direct-embed server failover, generation-gated `<video>` watchdog, HLS-resilient auto-resume, native 1080p subtitle overlay + `CC` picker, chrome hiding, and native remote OSD. |
 | `AdBlocker` | Ad domain/TLD/URL-substring checks, strict main-frame allowlisting, and subresource CDN allowlisting from `SiteConfig`. |
 | `App` | Process-level application context for bundled filter loading. |
 

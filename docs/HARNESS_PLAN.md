@@ -169,6 +169,11 @@ code to do it. Upstream candidates (in priority order):
       season/episode pickers), scrollable tab bar, native Search UI, and
       hardened `AdBlocker` (`BLOCKED_URL_SUBSTRINGS`, `STRICT_MAIN_FRAME_ALLOWLIST`,
       `EXTRA_BLOCKED_DOMAINS`, `BLOCKED_TLDS`, `ALLOWED_SUBRESOURCE_HOSTS`)
+- [x] Watch History (`WatchHistoryStore`), Continue Watching shelf + `RECENT`
+      tab, `DetailActivity` Resume / Start Over / TV progress indicators,
+      HLS-resilient auto-resume, multi-target in-flight poster fan-out
+      (`ISS-008`), and Native Subtitles (`SubtitleEngine` + `CC` picker +
+      1080p native caption overlay + HTML5 `textTracks` fallback)
 - [x] Field-notes playbook in `AGENT_GUIDE.md` (RSC traps, direct-embed
       pattern, watchdog, sound, geo-gate checklist, fork discipline)
 - [ ] Remaining Phase 4 tasks (RSC flight-data JSON mode, generic HTML
