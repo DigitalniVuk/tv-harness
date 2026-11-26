@@ -57,6 +57,9 @@ public final class SiteConfig {
     /** When true, clicking a catalogue card opens native DetailActivity before WatchActivity. */
     public static final boolean SHOW_DETAIL_SCREEN = false;
 
+    /** Persist watch history, Continue Watching, and Recently Watched locally. */
+    public static final boolean ENABLE_WATCH_HISTORY = true;
+
     public static final class Tab {
         final String id;
         final String label;

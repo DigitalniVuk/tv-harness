@@ -19,12 +19,14 @@ import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -72,6 +74,7 @@ public final class CatalogActivity extends Activity {
     private String activeCategory;
     private String lastQuery = "";
     private int generation;
+    private int lastHistoryVersion = -1;
 
     @Override
     public void onCreate(Bundle saved) {
@@ -79,8 +82,22 @@ public final class CatalogActivity extends Activity {
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
                 WindowManager.LayoutParams.FLAG_FULLSCREEN);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        lastHistoryVersion = WatchHistoryStore.version();
         createScreen();
         loadCatalog();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (!SiteConfig.ENABLE_WATCH_HISTORY) return;
+        int ver = WatchHistoryStore.version();
+        if (ver != lastHistoryVersion) {
+            lastHistoryVersion = ver;
+            if ("home".equals(mode) || "recent".equals(mode)) {
+                render();
+            }
+        }
     }
 
     private void createScreen() {
@@ -112,8 +129,16 @@ public final class CatalogActivity extends Activity {
         LinearLayout tabRow = new LinearLayout(this);
         tabRow.setOrientation(LinearLayout.HORIZONTAL);
         tabRow.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        boolean insertedRecent = false;
         for (SiteConfig.Tab t : SiteConfig.TABS) {
             tabRow.addView(tab(t.label, t.id, () -> { mode = t.id; render(); }), tabParams());
+            if (!insertedRecent && "home".equals(t.id) && SiteConfig.ENABLE_WATCH_HISTORY) {
+                tabRow.addView(tab("RECENT", "recent", () -> { mode = "recent"; render(); }), tabParams());
+                insertedRecent = true;
+            }
+        }
+        if (!insertedRecent && SiteConfig.ENABLE_WATCH_HISTORY) {
+            tabRow.addView(tab("RECENT", "recent", () -> { mode = "recent"; render(); }), tabParams());
         }
         if (SiteConfig.SEARCH_API_PATH_TEMPLATE != null
                 && !SiteConfig.SEARCH_API_PATH_TEMPLATE.isEmpty()) {
@@ -163,11 +188,11 @@ public final class CatalogActivity extends Activity {
     }
 
     private TextView tab(String label, String tabMode, Runnable click) {
-        TextView v = text(label, 13, WHITE, true);
+        TextView v = text(label, 12, WHITE, true);
         v.setGravity(Gravity.CENTER);
         v.setSingleLine(true);
-        v.setMinWidth(dp(78));
-        v.setPadding(dp(16), 0, dp(16), 0);
+        v.setMinWidth(dp(68));
+        v.setPadding(dp(12), 0, dp(12), 0);
         v.setFocusable(true);
         v.setOnClickListener(view -> click.run());
         if (tabMode != null) {
@@ -304,7 +329,9 @@ public final class CatalogActivity extends Activity {
         updateNavTabs();
         content.removeAllViews();
         firstContentFocus = null;
-        if ("search".equals(mode)) {
+        if ("recent".equals(mode)) {
+            addRecentUi();
+        } else if ("search".equals(mode)) {
             status.setText(lastQuery.isEmpty() ? "Search movies and TV shows" : ("Results for \"" + lastQuery + "\""));
             addSearchUi();
         } else if ("genres".equals(mode)) {
@@ -321,6 +348,13 @@ public final class CatalogActivity extends Activity {
                     items == null ? Collections.<CatalogItem>emptyList() : items);
         } else {
             boolean anyItems = false;
+            if (SiteConfig.ENABLE_WATCH_HISTORY) {
+                List<WatchHistoryStore.Entry> cw = WatchHistoryStore.getContinueWatching();
+                if (!cw.isEmpty()) {
+                    anyItems = true;
+                    addHistorySection("CONTINUE WATCHING", cw, true);
+                }
+            }
             for (SiteConfig.Tab t : SiteConfig.TABS) {
                 List<CatalogItem> items = tabItems.get(t.id);
                 if (items != null && !items.isEmpty()) anyItems = true;
@@ -334,13 +368,145 @@ public final class CatalogActivity extends Activity {
         }
         if (content.getChildCount() == 0 && "genres".equals(mode)) {
             status.setText("Category list is unavailable. Tap REFRESH to try again.");
-        } else if (content.getChildCount() == 0 && !"genres".equals(mode) && !"search".equals(mode)) {
+        } else if (content.getChildCount() == 0 && !"genres".equals(mode)
+                && !"search".equals(mode) && !"recent".equals(mode)) {
             addEmptyState();
         }
         View focus = firstContentFocus;
         if (focus != null) focus.post(() -> {
             if (focus.getParent() != null) focus.requestFocus();
         });
+    }
+
+    private void addRecentUi() {
+        List<WatchHistoryStore.Entry> cw = WatchHistoryStore.getContinueWatching();
+        List<WatchHistoryStore.Entry> recent = WatchHistoryStore.getRecentlyWatched();
+        if (recent.isEmpty()) {
+            status.setText("No watch history yet");
+            LinearLayout empty = new LinearLayout(this);
+            empty.setOrientation(LinearLayout.VERTICAL);
+            empty.setGravity(Gravity.CENTER);
+            empty.setPadding(dp(32), dp(64), dp(32), dp(64));
+            TextView msg = text("Play a movie or TV show to see Continue Watching and Recently Watched here.", 16, MUTED, false);
+            msg.setGravity(Gravity.CENTER);
+            empty.addView(msg);
+            content.addView(empty, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            return;
+        }
+
+        status.setText("Continue Watching (" + cw.size() + ")  ·  Recently Watched (" + recent.size() + ")");
+        if (!cw.isEmpty()) {
+            addHistorySection("CONTINUE WATCHING", cw, true);
+        }
+        addHistorySection("RECENTLY WATCHED", recent, false);
+
+        LinearLayout footerRow = new LinearLayout(this);
+        footerRow.setOrientation(LinearLayout.HORIZONTAL);
+        footerRow.setPadding(dp(30), dp(12), dp(30), dp(12));
+        TextView clearBtn = text("CLEAR WATCH HISTORY", 13, WHITE, true);
+        clearBtn.setGravity(Gravity.CENTER);
+        clearBtn.setPadding(dp(18), 0, dp(18), 0);
+        clearBtn.setFocusable(true);
+        clearBtn.setBackground(buttonBackground(Color.rgb(65, 34, 44), Color.rgb(175, 48, 68)));
+        clearBtn.setOnClickListener(v -> {
+            WatchHistoryStore.clearAll();
+            lastHistoryVersion = WatchHistoryStore.version();
+            Toast.makeText(this, "Watch history cleared", Toast.LENGTH_SHORT).show();
+            render();
+        });
+        footerRow.addView(clearBtn, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)));
+        content.addView(footerRow);
+    }
+
+    private void addHistorySection(String heading, List<WatchHistoryStore.Entry> entries, boolean continueMode) {
+        if (entries.isEmpty()) return;
+        TextView title = text(heading, 17, WHITE, true);
+        title.setPadding(dp(30), dp(10), dp(30), dp(8));
+        content.addView(title, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        HorizontalScrollView row = new HorizontalScrollView(this);
+        row.setHorizontalScrollBarEnabled(false);
+        row.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        row.setClipChildren(false);
+        row.setClipToPadding(false);
+        row.setPadding(dp(26), dp(6), dp(26), dp(12));
+        LinearLayout cards = new LinearLayout(this);
+        cards.setOrientation(LinearLayout.HORIZONTAL);
+        cards.setClipChildren(false);
+        cards.setClipToPadding(false);
+        int count = Math.min(MAX_CARDS, entries.size());
+        for (int i = 0; i < count; i++) {
+            View tile = historyCard(entries.get(i), continueMode, i < 8);
+            if (firstContentFocus == null) firstContentFocus = tile;
+            cards.addView(tile, cardParams(false));
+        }
+        row.addView(cards, new HorizontalScrollView.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        content.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(348)));
+    }
+
+    private View historyCard(WatchHistoryStore.Entry entry, boolean continueMode, boolean preload) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setFocusable(true);
+        card.setClipToOutline(true);
+        card.setBackground(buttonBackground(CARD, Color.rgb(45, 39, 75)));
+
+        FrameLayout posterWrap = new FrameLayout(this);
+        ImageView poster = new ImageView(this);
+        poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        poster.setBackgroundColor(Color.rgb(38, 44, 58));
+        poster.setTag(entry.posterUrl);
+        posterWrap.addView(poster, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Overlaid watch progress bar at bottom of poster
+        float frac = entry.progressFraction();
+        if (frac > 0f) {
+            LinearLayout track = new LinearLayout(this);
+            track.setOrientation(LinearLayout.HORIZONTAL);
+            track.setBackgroundColor(Color.argb(170, 10, 12, 18));
+            float clamped = Math.max(0.04f, Math.min(1.0f, frac));
+            View fill = new View(this);
+            fill.setBackgroundColor(entry.completed ? Color.rgb(66, 214, 140) : FOCUS);
+            track.addView(fill, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, clamped));
+            if (clamped < 1.0f) {
+                track.addView(new View(this), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.0f - clamped));
+            }
+            posterWrap.addView(track, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(5), Gravity.BOTTOM));
+        }
+
+        card.addView(posterWrap, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(246)));
+
+        card.setOnFocusChangeListener((v, focused) -> {
+            v.animate().scaleX(focused ? 1.04f : 1f).scaleY(focused ? 1.04f : 1f)
+                    .setDuration(110).start();
+            if (focused) loadPoster(entry.posterUrl, poster);
+        });
+        card.setOnClickListener(v -> open(entry.toCatalogItem()));
+
+        TextView name = text(entry.title, 14, WHITE, true);
+        name.setMaxLines(2);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        name.setPadding(dp(10), dp(8), dp(10), 0);
+        card.addView(name, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(46)));
+
+        String sub = entry.cardSubtitle(continueMode);
+        TextView meta = text(sub, 11, continueMode ? FOCUS : MUTED, continueMode);
+        meta.setMaxLines(1);
+        meta.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        meta.setPadding(dp(10), dp(2), dp(10), dp(6));
+        card.addView(meta, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(26)));
+
+        if (preload) loadPoster(entry.posterUrl, poster);
+        card.setContentDescription(entry.title + ", " + sub);
+        return card;
     }
 
     private void addSearchUi() {
@@ -641,6 +807,8 @@ public final class CatalogActivity extends Activity {
         intent.putExtra("backdropUrl", item.backdropUrl);
         intent.putExtra("overview", item.overview);
         intent.putExtra("details", item.details);
+        intent.putExtra("year", item.year);
+        intent.putExtra("rating", item.rating);
         startActivity(intent);
     }
 

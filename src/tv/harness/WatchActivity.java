@@ -113,12 +113,21 @@ public final class WatchActivity extends Activity {
     private String currentEpisodeNum = "";
 
     // Playback metadata & direct-embed state
+    private String detailUrl = "";
     private String itemTitle = "";
     private String mediaId = "";
     private String mediaType = "movie";
+    private String posterUrl = null;
+    private String backdropUrl = null;
+    private String overview = "";
+    private String details = "";
+    private String year = "";
+    private String rating = "";
+    private String episodeTitle = "";
     private int currentSeason = 1;
     private int currentEpisode = 1;
     private boolean directEmbedMode = false;
+    private int initialServerIndex = 0;
     private int currentServerIndex = 0;
     private int loadGeneration = 0;
     private boolean pageCommitted = false;
@@ -131,6 +140,13 @@ public final class WatchActivity extends Activity {
     private boolean videoCurrentlyMuted = false;
     private int playClickAttempts = 0;
     private int blockedReqCount = 0;
+
+    // Watch history & resume state
+    private double pendingResumeSec = 0.0;
+    private int resumeAttempts = 0;
+    private double lastKnownPosSec = 0.0;
+    private double lastKnownDurSec = 0.0;
+    private long lastHistorySaveMs = 0L;
 
     @Override
     public void onCreate(Bundle state) {
@@ -145,7 +161,7 @@ public final class WatchActivity extends Activity {
 
         if (state == null) {
             if (directEmbedMode) {
-                loadDirectEmbedServer(0);
+                loadDirectEmbedServer(initialServerIndex);
             } else {
                 serverLoadStartedMs = SystemClock.elapsedRealtime();
                 web.loadUrl(startUrl());
@@ -164,6 +180,7 @@ public final class WatchActivity extends Activity {
     private void parseIntentMeta() {
         Intent i = getIntent();
         String url = i.getStringExtra("url");
+        detailUrl = url == null ? "" : url;
         itemTitle = i.getStringExtra("title");
         if (itemTitle == null) itemTitle = "";
         mediaId = i.getStringExtra("mediaId");
@@ -177,6 +194,13 @@ public final class WatchActivity extends Activity {
                 mediaType = "movie";
             }
         }
+        posterUrl = i.getStringExtra("posterUrl");
+        backdropUrl = i.getStringExtra("backdropUrl");
+        overview = nonEmpty(i.getStringExtra("overview"));
+        details = nonEmpty(i.getStringExtra("details"));
+        year = nonEmpty(i.getStringExtra("year"));
+        rating = nonEmpty(i.getStringExtra("rating"));
+        episodeTitle = nonEmpty(i.getStringExtra("episodeTitle"));
         currentSeason = Math.max(1, i.getIntExtra("season", 1));
         currentEpisode = Math.max(1, i.getIntExtra("episode", 1));
         currentEpisodeNum = String.valueOf(currentEpisode);
@@ -190,6 +214,50 @@ public final class WatchActivity extends Activity {
 
         String[] templates = currentEmbedTemplates();
         directEmbedMode = !mediaId.isEmpty() && templates.length > 0;
+
+        boolean startOver = i.getBooleanExtra("startOver", false);
+        double explicitResume = i.getDoubleExtra("resumePosSec", 0.0);
+        int prefServer = i.getIntExtra("preferredServerIdx", -1);
+        if (!startOver && SiteConfig.ENABLE_WATCH_HISTORY) {
+            if (explicitResume >= 10.0) {
+                pendingResumeSec = explicitResume;
+            } else {
+                String key = WatchHistoryStore.canonicalKey(mediaType, mediaId, detailUrl);
+                WatchHistoryStore.Entry saved = WatchHistoryStore.get(key);
+                if (saved != null && saved.isInProgress()) {
+                    boolean epMatch = !"tv".equalsIgnoreCase(mediaType)
+                            || (saved.season == currentSeason && saved.episode == currentEpisode);
+                    if (epMatch) {
+                        pendingResumeSec = saved.positionSec;
+                        if (prefServer < 0) prefServer = saved.serverIdx;
+                    }
+                }
+            }
+        }
+        if (prefServer >= 0 && prefServer < templates.length) {
+            initialServerIndex = prefServer;
+        }
+    }
+
+    private static String nonEmpty(String s) {
+        return s == null ? "" : s;
+    }
+
+    private void saveProgressNow() {
+        if (!SiteConfig.ENABLE_WATCH_HISTORY) return;
+        if (pendingResumeSec > 0.0) return; // Do not overwrite saved position before resume finishes
+        if (lastKnownDurSec <= 60.0 || lastKnownPosSec < 10.0) return;
+        lastHistorySaveMs = SystemClock.elapsedRealtime();
+        WatchHistoryStore.saveProgress(
+                mediaId, mediaType, itemTitle,
+                posterUrl, backdropUrl, detailUrl,
+                overview, details, year, rating,
+                currentSeason, currentEpisode, episodeTitle,
+                lastKnownPosSec, lastKnownDurSec, currentServerIndex);
+        Log.i(TAG, "HISTORY_SAVED title=" + itemTitle
+                + ("tv".equalsIgnoreCase(mediaType) ? (" S" + currentSeason + "E" + currentEpisode) : "")
+                + " pos=" + String.format(Locale.US, "%.1f", lastKnownPosSec)
+                + "/" + String.format(Locale.US, "%.0f", lastKnownDurSec));
     }
 
     private String[] currentEmbedTemplates() {
@@ -256,6 +324,10 @@ public final class WatchActivity extends Activity {
         String msg = automatic
                 ? (serverLabel(currentServerIndex) + " stalled — trying " + serverLabel(next) + "…")
                 : ("Switching to " + serverLabel(next) + "…");
+        if (!automatic && lastKnownPosSec >= 10.0 && lastKnownDurSec > 60.0) {
+            pendingResumeSec = lastKnownPosSec;
+            resumeAttempts = 0;
+        }
         Log.i(TAG, "SERVER_SWITCH: " + msg);
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
         loadDirectEmbedServer(next);
@@ -677,8 +749,14 @@ public final class WatchActivity extends Activity {
             Toast.makeText(this, "Last episode of Season " + currentSeason, Toast.LENGTH_SHORT).show();
             return;
         }
+        saveProgressNow();
         currentEpisode = target;
         currentEpisodeNum = String.valueOf(currentEpisode);
+        episodeTitle = "";
+        pendingResumeSec = 0.0;
+        resumeAttempts = 0;
+        lastKnownPosSec = 0.0;
+        lastKnownDurSec = 0.0;
         Toast.makeText(this, "Loading S" + currentSeason + " E" + currentEpisode + "…", Toast.LENGTH_SHORT).show();
         loadDirectEmbedServer(currentServerIndex);
     }
@@ -808,10 +886,16 @@ public final class WatchActivity extends Activity {
         currentEpisodeNum = num;
         toggleEpisodeSheet();
         if (directEmbedMode) {
+            saveProgressNow();
             try {
                 currentEpisode = Integer.parseInt(num);
             } catch (NumberFormatException ignored) {
             }
+            episodeTitle = "";
+            pendingResumeSec = 0.0;
+            resumeAttempts = 0;
+            lastKnownPosSec = 0.0;
+            lastKnownDurSec = 0.0;
             Toast.makeText(this, "Loading S" + currentSeason + " E" + currentEpisode + "…", Toast.LENGTH_SHORT).show();
             loadDirectEmbedServer(currentServerIndex);
             return;
@@ -1108,6 +1192,45 @@ public final class WatchActivity extends Activity {
                 }
             }
 
+            // Auto-resume seeking once metadata/playback is ready (resilient against HLS snap-back to 0)
+            if (found && pendingResumeSec >= 10.0 && dur > 60.0 && (rs >= 1 || playbackStarted)) {
+                double seekTarget = Math.min(pendingResumeSec, Math.max(10.0, dur - 15.0));
+                if (ct >= seekTarget - 8.0) {
+                    Log.i(TAG, "RESUMED_AT ct=" + String.format(Locale.US, "%.1f", ct)
+                            + " target=" + String.format(Locale.US, "%.1f", seekTarget));
+                    pendingResumeSec = 0.0;
+                    resumeAttempts = 0;
+                } else if (resumeAttempts < 4 && (playbackStarted || rs >= 2)) {
+                    resumeAttempts++;
+                    final int attemptNum = resumeAttempts;
+                    final double targetSec = seekTarget;
+                    Log.i(TAG, "RESUME_SEEK attempt=" + attemptNum
+                            + " target=" + String.format(Locale.US, "%.1f", targetSec)
+                            + " ct=" + String.format(Locale.US, "%.1f", ct));
+                    if (attemptNum == 1) {
+                        Toast.makeText(this, "Resuming at " + WatchHistoryStore.formatTime(targetSec),
+                                Toast.LENGTH_SHORT).show();
+                    }
+                    String seekJs = "(function(){var v=document.querySelector('video');"
+                            + "if(v&&isFinite(v.duration)){v.currentTime=" + String.format(Locale.US, "%.2f", targetSec)
+                            + ";if(v.paused&&!" + (userPaused ? "true" : "false") + "){"
+                            + "var p=v.play();if(p&&p.catch)p.catch(function(){});}}})()";
+                    web.evaluateJavascript(seekJs, null);
+                } else if (resumeAttempts >= 4) {
+                    pendingResumeSec = 0.0;
+                }
+            }
+
+            // Periodic watch-progress persistence (only after any pending resume finishes)
+            if (found && dur > 60.0 && ct >= 10.0 && pendingResumeSec <= 0.0) {
+                lastKnownPosSec = ct;
+                lastKnownDurSec = dur;
+                long nowMs = SystemClock.elapsedRealtime();
+                if (nowMs - lastHistorySaveMs >= 6000L) {
+                    saveProgressNow();
+                }
+            }
+
             handler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL_MS);
         });
     }
@@ -1150,12 +1273,31 @@ public final class WatchActivity extends Activity {
 
     private void seekBy(int deltaSeconds) {
         if (web == null) return;
+        pendingResumeSec = 0.0;
+        resumeAttempts = 0;
         String js = "(function(){"
                 + "var v=document.querySelector('video');"
-                + "if(!v||!isFinite(v.duration))return false;"
-                + "v.currentTime=Math.max(0,Math.min(v.duration,v.currentTime+(" + deltaSeconds + ")));"
-                + "return true;})()";
-        web.evaluateJavascript(js, null);
+                + "if(!v||!isFinite(v.duration))return '-1';"
+                + "var t=Math.max(0,Math.min(v.duration,v.currentTime+(" + deltaSeconds + ")));"
+                + "v.currentTime=t;"
+                + "return t.toFixed(1)+':'+v.duration.toFixed(1);})()";
+        web.evaluateJavascript(js, res -> {
+            if (res == null) return;
+            String clean = res.replace("\"", "");
+            int colon = clean.indexOf(':');
+            if (colon > 0) {
+                try {
+                    double newPos = Double.parseDouble(clean.substring(0, colon));
+                    double newDur = Double.parseDouble(clean.substring(colon + 1));
+                    if (newDur > 60.0 && newPos >= 10.0) {
+                        lastKnownPosSec = newPos;
+                        lastKnownDurSec = newDur;
+                        saveProgressNow();
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        });
         scheduleHideOsd();
     }
 
@@ -1237,6 +1379,7 @@ public final class WatchActivity extends Activity {
                     userPaused = true;
                     videoCurrentlyPaused = true;
                     if (pauseButton != null) pauseButton.setText("▶\nPLAY");
+                    saveProgressNow();
                 } else if (res != null && res.contains("playing")) {
                     userPaused = false;
                     videoCurrentlyPaused = false;
@@ -1494,13 +1637,21 @@ public final class WatchActivity extends Activity {
     }
 
     @Override
+    protected void onPause() {
+        saveProgressNow();
+        super.onPause();
+    }
+
+    @Override
     protected void onSaveInstanceState(Bundle out) {
+        saveProgressNow();
         if (web != null) web.saveState(out);
         super.onSaveInstanceState(out);
     }
 
     @Override
     protected void onDestroy() {
+        saveProgressNow();
         handler.removeCallbacks(hideControlsRunnable);
         handler.removeCallbacks(watchdogRunnable);
         bgWorkers.shutdownNow();
