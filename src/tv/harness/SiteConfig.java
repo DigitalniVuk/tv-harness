@@ -224,6 +224,14 @@ public final class SiteConfig {
     /** Automatically unmute HTML5 <video> when playback begins. */
     public static final boolean AUTO_UNMUTE = true;
 
+    /**
+     * Optional external subtitle JSON API templates supporting {id}, {season},
+     * {episode}. When empty, WatchActivity falls back to inspecting HTML5 /
+     * media-player textTracks in the player page.
+     */
+    public static final String[] SUBTITLE_API_MOVIE_URLS = {};
+    public static final String[] SUBTITLE_API_TV_URLS = {};
+
     // ------------------------------------------------------------------
     // Host allowlists & blocking rules (also feed AdBlocker)
     // ------------------------------------------------------------------

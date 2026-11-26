@@ -66,6 +66,7 @@ public final class WatchActivity extends Activity {
     private static final int GLASS_BTN = Color.argb(220, 30, 35, 48);
     private static final int AUTO_HIDE_DELAY_MS = 4500;
     private static final int WATCHDOG_INTERVAL_MS = 1500;
+    private static final int CAPTION_TICK_MS = 250;
 
     private static class EpisodeInfo {
         final String num;
@@ -86,7 +87,14 @@ public final class WatchActivity extends Activity {
     private LinearLayout episodeListContainer;
     private HorizontalScrollView episodeScrollView;
     private TextView episodeSheetTitle;
+    private LinearLayout subtitleSheet;
+    private LinearLayout subtitleListContainer;
+    private HorizontalScrollView subtitleScrollView;
+    private TextView subtitleSheetTitle;
+    private TextView subtitleView;
+    private FrameLayout.LayoutParams subtitleViewParams;
     private TextView title;
+    private TextView ccButton;
     private TextView serverButton;
     private TextView pauseButton;
     private TextView soundButton;
@@ -105,12 +113,22 @@ public final class WatchActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable hideControlsRunnable = this::hideOsd;
     private final Runnable watchdogRunnable = this::pollVideoState;
-    private final ExecutorService bgWorkers = Executors.newSingleThreadExecutor();
+    private final Runnable captionTickRunnable = this::pollCaptionTick;
+    private final ExecutorService bgWorkers = Executors.newFixedThreadPool(2);
 
     private boolean osdVisible = true;
     private boolean episodeSheetVisible = false;
+    private boolean subtitleSheetVisible = false;
     private final List<EpisodeInfo> loadedEpisodes = new ArrayList<>();
     private String currentEpisodeNum = "";
+
+    // Native subtitle engine state
+    private final List<SubtitleEngine.Track> loadedSubtitles = new ArrayList<>();
+    private boolean subtitlesLoadedOnce = false;
+    private int subtitleGeneration = 0;
+    private SubtitleEngine.Track activeSubtitleTrack = null;
+    private List<SubtitleEngine.Cue> activeSubtitleCues = Collections.emptyList();
+    private String lastRenderedCaption = "";
 
     // Playback metadata & direct-embed state
     private String detailUrl = "";
@@ -173,6 +191,7 @@ public final class WatchActivity extends Activity {
         if (directEmbedMode && "tv".equalsIgnoreCase(mediaType)) {
             fetchNativeTvEpisodes();
         }
+        loadSubtitlesForCurrentMedia();
         startWatchdog();
         scheduleHideOsd();
     }
@@ -372,6 +391,30 @@ public final class WatchActivity extends Activity {
         playerArea.addView(web, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
+        // Native 1080p TV subtitle caption overlay (sits above WebView, shifts up when OSD is visible)
+        subtitleView = new TextView(this);
+        subtitleView.setTextColor(Color.WHITE);
+        subtitleView.setTextSize(26);
+        subtitleView.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        subtitleView.setGravity(Gravity.CENTER);
+        subtitleView.setShadowLayer(4f, 0f, 2f, Color.BLACK);
+        subtitleView.setPadding(dp(18), dp(8), dp(18), dp(8));
+        subtitleView.setMaxWidth(dp(780));
+        subtitleView.setFocusable(false);
+        subtitleView.setClickable(false);
+        subtitleView.setVisibility(View.GONE);
+        GradientDrawable subBg = new GradientDrawable();
+        subBg.setColor(Color.argb(196, 0, 0, 0));
+        subBg.setCornerRadius(dp(8));
+        subtitleView.setBackground(subBg);
+        subtitleViewParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        subtitleViewParams.leftMargin = dp(64);
+        subtitleViewParams.rightMargin = dp(64);
+        subtitleViewParams.bottomMargin = dp(128);
+        rootOverlay.addView(subtitleView, subtitleViewParams);
+
         // Centered loading indicator shown until video frames advance
         loadingOverlay = new LinearLayout(this);
         loadingOverlay.setOrientation(LinearLayout.HORIZONTAL);
@@ -418,6 +461,9 @@ public final class WatchActivity extends Activity {
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         topBar.addView(title, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        ccButton = action("CC: OFF", "Subtitles", this::toggleSubtitleSheet);
+        topBar.addView(ccButton, headerButtonParams(dp(106)));
 
         if (directEmbedMode && currentEmbedTemplates().length > 1) {
             serverButton = action("SERVER", "Switch stream server", () -> switchToNextServer(false));
@@ -478,6 +524,44 @@ public final class WatchActivity extends Activity {
         sheetParams.leftMargin = dp(24);
         sheetParams.rightMargin = dp(24);
         rootOverlay.addView(episodeSheet, sheetParams);
+
+        // Subtitle selector sheet overlay
+        subtitleSheet = new LinearLayout(this);
+        subtitleSheet.setOrientation(LinearLayout.VERTICAL);
+        subtitleSheet.setBackground(sheetBackgroundDrawable());
+        subtitleSheet.setPadding(dp(20), dp(16), dp(20), dp(16));
+        subtitleSheet.setVisibility(View.GONE);
+
+        LinearLayout subHeader = new LinearLayout(this);
+        subHeader.setGravity(Gravity.CENTER_VERTICAL);
+        subtitleSheetTitle = new TextView(this);
+        subtitleSheetTitle.setText("SUBTITLES (CC)");
+        subtitleSheetTitle.setTextColor(Color.WHITE);
+        subtitleSheetTitle.setTextSize(16);
+        subtitleSheetTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        subHeader.addView(subtitleSheetTitle, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        subHeader.addView(action("CLOSE ✕", "Close subtitles", this::toggleSubtitleSheet), headerButtonParams(dp(106)));
+        subtitleSheet.addView(subHeader, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        subtitleScrollView = new HorizontalScrollView(this);
+        subtitleScrollView.setHorizontalScrollBarEnabled(false);
+        subtitleScrollView.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        subtitleListContainer = new LinearLayout(this);
+        subtitleListContainer.setOrientation(LinearLayout.HORIZONTAL);
+        subtitleListContainer.setPadding(0, dp(12), 0, dp(4));
+        subtitleScrollView.addView(subtitleListContainer, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        subtitleSheet.addView(subtitleScrollView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        FrameLayout.LayoutParams subSheetParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+        subSheetParams.bottomMargin = dp(116);
+        subSheetParams.leftMargin = dp(24);
+        subSheetParams.rightMargin = dp(24);
+        rootOverlay.addView(subtitleSheet, subSheetParams);
 
         // Bottom OSD: progress/time bar + transport controls
         bottomContainer = new LinearLayout(this);
@@ -628,7 +712,9 @@ public final class WatchActivity extends Activity {
         button.setOnClickListener(v -> {
             scheduleHideOsd();
             run.run();
-            if (!isFinishing()) v.post(v::requestFocus);
+            if (!isFinishing() && !episodeSheetVisible && !subtitleSheetVisible) {
+                v.post(v::requestFocus);
+            }
         });
         button.setBackground(buttonBackground());
         return button;
@@ -654,7 +740,7 @@ public final class WatchActivity extends Activity {
 
     private void scheduleHideOsd() {
         handler.removeCallbacks(hideControlsRunnable);
-        if (episodeSheetVisible) return;
+        if (episodeSheetVisible || subtitleSheetVisible) return;
         handler.postDelayed(hideControlsRunnable, AUTO_HIDE_DELAY_MS);
     }
 
@@ -670,7 +756,8 @@ public final class WatchActivity extends Activity {
         osdVisible = true;
         toolbar.setVisibility(View.VISIBLE);
         bottomContainer.setVisibility(View.VISIBLE);
-        if (!controls.hasFocus() && !toolbar.hasFocus() && !episodeSheetVisible
+        updateSubtitleMargin(true);
+        if (!controls.hasFocus() && !toolbar.hasFocus() && !episodeSheetVisible && !subtitleSheetVisible
                 && controls.getChildCount() > 0) {
             controls.getChildAt(0).requestFocus();
         }
@@ -678,16 +765,26 @@ public final class WatchActivity extends Activity {
     }
 
     private void hideOsd() {
-        if (episodeSheetVisible) return;
+        if (episodeSheetVisible || subtitleSheetVisible) return;
         osdVisible = false;
         toolbar.setVisibility(View.GONE);
         bottomContainer.setVisibility(View.GONE);
+        updateSubtitleMargin(false);
         if (directEmbedMode) {
             if (rootOverlay != null && !rootOverlay.hasFocus()) {
                 rootOverlay.requestFocus();
             }
         } else if (web != null && !web.hasFocus()) {
             web.requestFocus();
+        }
+    }
+
+    private void updateSubtitleMargin(boolean osdShowing) {
+        if (subtitleView == null || subtitleViewParams == null) return;
+        int target = dp(osdShowing ? 128 : 44);
+        if (subtitleViewParams.bottomMargin != target) {
+            subtitleViewParams.bottomMargin = target;
+            subtitleView.setLayoutParams(subtitleViewParams);
         }
     }
 
@@ -698,6 +795,10 @@ public final class WatchActivity extends Activity {
         }
         episodeSheetVisible = !episodeSheetVisible;
         if (episodeSheetVisible) {
+            if (subtitleSheetVisible) {
+                subtitleSheetVisible = false;
+                subtitleSheet.setVisibility(View.GONE);
+            }
             showOsd();
             handler.removeCallbacks(hideControlsRunnable);
             episodeSheet.setVisibility(View.VISIBLE);
@@ -758,6 +859,7 @@ public final class WatchActivity extends Activity {
         lastKnownPosSec = 0.0;
         lastKnownDurSec = 0.0;
         Toast.makeText(this, "Loading S" + currentSeason + " E" + currentEpisode + "…", Toast.LENGTH_SHORT).show();
+        loadSubtitlesForCurrentMedia();
         loadDirectEmbedServer(currentServerIndex);
     }
 
@@ -897,6 +999,7 @@ public final class WatchActivity extends Activity {
             lastKnownPosSec = 0.0;
             lastKnownDurSec = 0.0;
             Toast.makeText(this, "Loading S" + currentSeason + " E" + currentEpisode + "…", Toast.LENGTH_SHORT).show();
+            loadSubtitlesForCurrentMedia();
             loadDirectEmbedServer(currentServerIndex);
             return;
         }
@@ -917,6 +1020,361 @@ public final class WatchActivity extends Activity {
                 Toast.makeText(this, "Episode " + num + " not clickable yet", Toast.LENGTH_SHORT).show();
             }
         });
+    }
+
+    private void toggleSubtitleSheet() {
+        subtitleSheetVisible = !subtitleSheetVisible;
+        if (subtitleSheetVisible) {
+            if (episodeSheetVisible) {
+                episodeSheetVisible = false;
+                episodeSheet.setVisibility(View.GONE);
+            }
+            showOsd();
+            handler.removeCallbacks(hideControlsRunnable);
+            subtitleSheet.setVisibility(View.VISIBLE);
+            if (!subtitlesLoadedOnce) {
+                loadSubtitlesForCurrentMedia();
+            } else if (loadedSubtitles.isEmpty()) {
+                discoverHtml5TextTracksFallback(subtitleGeneration);
+            }
+            populateSubtitleUi();
+        } else {
+            subtitleSheet.setVisibility(View.GONE);
+            scheduleHideOsd();
+            if (controls.getChildCount() > 0) {
+                controls.getChildAt(0).requestFocus();
+            }
+        }
+    }
+
+    private void loadSubtitlesForCurrentMedia() {
+        final int subGen = ++subtitleGeneration;
+        subtitlesLoadedOnce = false;
+        activeSubtitleTrack = null;
+        activeSubtitleCues = Collections.emptyList();
+        loadedSubtitles.clear();
+        handler.removeCallbacks(captionTickRunnable);
+        renderCaptionText("");
+        updateCcButtonLabel();
+
+        final String prefLang = WatchHistoryStore.getPreferredSubLang();
+        final String mType = mediaType;
+        final String mId = mediaId;
+        final int s = currentSeason;
+        final int e = currentEpisode;
+
+        bgWorkers.execute(() -> {
+            List<SubtitleEngine.Track> tracks = SubtitleEngine.fetchTracks(mType, mId, s, e, prefLang);
+            runOnUiThread(() -> {
+                if (isFinishing() || subGen != subtitleGeneration) return;
+                subtitlesLoadedOnce = true;
+                loadedSubtitles.clear();
+                loadedSubtitles.addAll(tracks);
+                Log.i(TAG, "SUBTITLES_AVAILABLE count=" + loadedSubtitles.size()
+                        + " pref=" + (prefLang.isEmpty() ? "unset" : prefLang));
+                if (loadedSubtitles.isEmpty()) {
+                    discoverHtml5TextTracksFallback(subGen);
+                } else {
+                    SubtitleEngine.Track auto = SubtitleEngine.findBestMatch(loadedSubtitles, prefLang);
+                    if (auto != null) {
+                        activateSubtitleTrack(auto, false);
+                    }
+                    if (subtitleSheetVisible) populateSubtitleUi();
+                }
+            });
+        });
+    }
+
+    private void discoverHtml5TextTracksFallback(final int subGen) {
+        if (web == null) return;
+        String js = "(function(){"
+                + "var mp=document.querySelector('media-player');"
+                + "var v=document.querySelector('video');"
+                + "var list=(mp&&mp.textTracks&&mp.textTracks.length)?mp.textTracks:(v?v.textTracks:null);"
+                + "if(!list)return '[]';"
+                + "var out=[];"
+                + "for(var i=0;i<list.length;i++){"
+                + "  var t=list[i];"
+                + "  if(t.kind&&t.kind!=='subtitles'&&t.kind!=='captions')continue;"
+                + "  out.push({idx:i,label:(t.label||t.language||('Track '+(i+1))),lang:(t.language||'')});"
+                + "}"
+                + "return JSON.stringify(out);})()";
+        web.evaluateJavascript(js, res -> {
+            if (isFinishing() || subGen != subtitleGeneration || res == null || "null".equals(res)) return;
+            try {
+                String unquoted = new JSONObject("{data:" + res + "}").getString("data");
+                JSONArray arr = new JSONArray(unquoted);
+                if (arr.length() == 0) return;
+                loadedSubtitles.clear();
+                for (int i = 0; i < arr.length() && i < 40; i++) {
+                    JSONObject o = arr.getJSONObject(i);
+                    int idx = o.optInt("idx", i);
+                    String label = o.optString("label", "Track " + (idx + 1));
+                    String lang = SubtitleEngine.normalizeLangCode(o.optString("lang", label));
+                    loadedSubtitles.add(new SubtitleEngine.Track(
+                            "html5:" + idx, label, lang, "", false, true, idx));
+                }
+                String pref = WatchHistoryStore.getPreferredSubLang();
+                SubtitleEngine.Track auto = SubtitleEngine.findBestMatch(loadedSubtitles, pref);
+                if (auto != null && activeSubtitleTrack == null) {
+                    activateSubtitleTrack(auto, false);
+                }
+                if (subtitleSheetVisible) populateSubtitleUi();
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private void populateSubtitleUi() {
+        subtitleListContainer.removeAllViews();
+        if (!subtitlesLoadedOnce && loadedSubtitles.isEmpty()) {
+            ProgressBar spinner = new ProgressBar(this);
+            spinner.setIndeterminate(true);
+            spinner.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(ACCENT));
+            LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(dp(24), dp(24));
+            sp.gravity = Gravity.CENTER_VERTICAL;
+            sp.rightMargin = dp(10);
+            sp.leftMargin = dp(4);
+            subtitleListContainer.addView(spinner, sp);
+
+            TextView loading = new TextView(this);
+            loading.setText("Loading subtitles…");
+            loading.setTextColor(Color.rgb(180, 185, 200));
+            loading.setTextSize(14);
+            loading.setGravity(Gravity.CENTER_VERTICAL);
+            subtitleListContainer.addView(loading);
+            return;
+        }
+
+        subtitleSheetTitle.setText("SUBTITLES  (" + loadedSubtitles.size() + " TRACKS)");
+
+        // Always put OFF first
+        boolean isOff = (activeSubtitleTrack == null);
+        subtitleListContainer.addView(createSubtitlePill("OFF", "off", isOff, () -> {
+            disableSubtitles(true);
+            toggleSubtitleSheet();
+        }));
+
+        for (SubtitleEngine.Track track : loadedSubtitles) {
+            final SubtitleEngine.Track chosen = track;
+            boolean selected = activeSubtitleTrack != null && track.id.equals(activeSubtitleTrack.id);
+            subtitleListContainer.addView(createSubtitlePill(track.displayName, track.id, selected, () -> {
+                activateSubtitleTrack(chosen, true);
+                toggleSubtitleSheet();
+            }));
+        }
+
+        focusActiveSubtitleOrFirst();
+    }
+
+    private TextView createSubtitlePill(String label, String tag, boolean isActive, Runnable onClick) {
+        TextView btn = new TextView(this);
+        btn.setText(isActive ? ("✓ " + label) : label);
+        btn.setTag(tag);
+        btn.setSingleLine(true);
+        btn.setPadding(dp(16), 0, dp(16), 0);
+        btn.setMinWidth(dp(84));
+        btn.setTextColor(Color.WHITE);
+        btn.setTextSize(13);
+        btn.setTypeface(Typeface.DEFAULT, isActive ? Typeface.BOLD : Typeface.NORMAL);
+        btn.setGravity(Gravity.CENTER);
+        btn.setFocusable(true);
+        btn.setFocusableInTouchMode(true);
+
+        GradientDrawable norm = new GradientDrawable();
+        norm.setColor(isActive ? ACCENT : GLASS_BTN);
+        norm.setCornerRadius(dp(8));
+        norm.setStroke(dp(1), isActive ? FOCUS : Color.argb(60, 255, 255, 255));
+
+        GradientDrawable foc = new GradientDrawable();
+        foc.setColor(ACCENT);
+        foc.setCornerRadius(dp(8));
+        foc.setStroke(dp(3), FOCUS);
+
+        StateListDrawable states = new StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_focused}, foc);
+        states.addState(new int[]{android.R.attr.state_pressed}, foc);
+        states.addState(new int[]{}, norm);
+        btn.setBackground(states);
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(44));
+        lp.rightMargin = dp(8);
+        btn.setLayoutParams(lp);
+        btn.setOnClickListener(v -> onClick.run());
+        return btn;
+    }
+
+    private void focusActiveSubtitleOrFirst() {
+        View target = null;
+        String activeTag = activeSubtitleTrack == null ? "off" : activeSubtitleTrack.id;
+        for (int i = 0; i < subtitleListContainer.getChildCount(); i++) {
+            View child = subtitleListContainer.getChildAt(i);
+            if (activeTag.equals(child.getTag())) {
+                target = child;
+                break;
+            }
+        }
+        if (target == null && subtitleListContainer.getChildCount() > 0) {
+            target = subtitleListContainer.getChildAt(0);
+        }
+        if (target != null) {
+            final View toFocus = target;
+            toFocus.post(() -> {
+                toFocus.requestFocus();
+                int scrollTo = toFocus.getLeft() - dp(40);
+                subtitleScrollView.smoothScrollTo(Math.max(0, scrollTo), 0);
+            });
+        }
+    }
+
+    private void disableSubtitles(boolean userInitiated) {
+        activeSubtitleTrack = null;
+        activeSubtitleCues = Collections.emptyList();
+        handler.removeCallbacks(captionTickRunnable);
+        renderCaptionText("");
+        updateCcButtonLabel();
+        if (userInitiated) {
+            WatchHistoryStore.setPreferredSubLang("off");
+            Toast.makeText(this, "Subtitles: Off", Toast.LENGTH_SHORT).show();
+            Log.i(TAG, "SUBTITLE_OFF");
+        }
+    }
+
+    private void activateSubtitleTrack(SubtitleEngine.Track track, boolean userInitiated) {
+        if (track == null) {
+            disableSubtitles(userInitiated);
+            return;
+        }
+        activeSubtitleTrack = track;
+        activeSubtitleCues = Collections.emptyList();
+        updateCcButtonLabel();
+        if (userInitiated) {
+            String prefToSave = !track.langCode.isEmpty() ? track.langCode : track.displayName;
+            WatchHistoryStore.setPreferredSubLang(prefToSave);
+            Toast.makeText(this, "Subtitles: " + track.displayName, Toast.LENGTH_SHORT).show();
+        }
+
+        if (track.html5Fallback) {
+            final int idx = track.html5Index;
+            if (web != null) {
+                String js = "(function(){"
+                        + "var mp=document.querySelector('media-player');"
+                        + "var v=document.querySelector('video');"
+                        + "var list=(mp&&mp.textTracks&&mp.textTracks.length)?mp.textTracks:(v?v.textTracks:null);"
+                        + "if(!list)return;"
+                        + "for(var i=0;i<list.length;i++){try{list[i].mode=(i===" + idx + ")?'hidden':'disabled';}catch(e){}}"
+                        + "})()";
+                web.evaluateJavascript(js, null);
+            }
+            Log.i(TAG, "SUBTITLE_SELECTED_HTML5 label=" + track.displayName + " idx=" + idx);
+            startCaptionTicks();
+            return;
+        }
+
+        final int subGen = subtitleGeneration;
+        final String trackId = track.id;
+        bgWorkers.execute(() -> {
+            try {
+                List<SubtitleEngine.Cue> cues = SubtitleEngine.fetchCues(track.url);
+                runOnUiThread(() -> {
+                    if (isFinishing() || subGen != subtitleGeneration
+                            || activeSubtitleTrack == null
+                            || !trackId.equals(activeSubtitleTrack.id)) {
+                        return;
+                    }
+                    activeSubtitleCues = cues;
+                    Log.i(TAG, "SUBTITLE_LOADED label=" + track.displayName
+                            + " lang=" + track.langCode + " cues=" + cues.size());
+                    startCaptionTicks();
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    if (!isFinishing() && userInitiated) {
+                        Toast.makeText(this, "Failed to load subtitle track", Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }
+        });
+    }
+
+    private void updateCcButtonLabel() {
+        if (ccButton == null) return;
+        if (activeSubtitleTrack == null) {
+            ccButton.setText("CC: OFF");
+            ccButton.setContentDescription("Subtitles off");
+        } else {
+            ccButton.setText("CC: " + activeSubtitleTrack.shortBadge());
+            ccButton.setContentDescription("Subtitles " + activeSubtitleTrack.displayName);
+        }
+    }
+
+    private void startCaptionTicks() {
+        handler.removeCallbacks(captionTickRunnable);
+        if (activeSubtitleTrack != null) {
+            handler.post(captionTickRunnable);
+        }
+    }
+
+    private void pollCaptionTick() {
+        if (isFinishing() || web == null || activeSubtitleTrack == null) return;
+        if (activeSubtitleTrack.html5Fallback) {
+            final int idx = activeSubtitleTrack.html5Index;
+            String js = "(function(){"
+                    + "var mp=document.querySelector('media-player');"
+                    + "var v=document.querySelector('video');"
+                    + "var list=(mp&&mp.textTracks&&mp.textTracks.length)?mp.textTracks:(v?v.textTracks:null);"
+                    + "if(!list||!list[" + idx + "]||!list[" + idx + "].activeCues)return '';"
+                    + "var ac=list[" + idx + "].activeCues;var out=[];"
+                    + "for(var i=0;i<ac.length;i++){if(ac[i].text)out.push(ac[i].text);}"
+                    + "return out.join('\\n');})()";
+            web.evaluateJavascript(js, res -> {
+                if (isFinishing() || activeSubtitleTrack == null) return;
+                String text = "";
+                if (res != null && !"null".equals(res)) {
+                    try {
+                        text = new JSONObject("{data:" + res + "}").getString("data");
+                    } catch (Exception ignored) {
+                    }
+                }
+                renderCaptionText(text.trim());
+                handler.postDelayed(captionTickRunnable, CAPTION_TICK_MS);
+            });
+            return;
+        }
+
+        if (activeSubtitleCues.isEmpty()) {
+            handler.postDelayed(captionTickRunnable, CAPTION_TICK_MS);
+            return;
+        }
+        String js = "(function(){var v=document.querySelector('video');return v?v.currentTime:-1;})()";
+        web.evaluateJavascript(js, res -> {
+            if (isFinishing() || activeSubtitleTrack == null) return;
+            if (res != null && !"null".equals(res)) {
+                try {
+                    double ct = Double.parseDouble(res.replace("\"", ""));
+                    if (ct >= 0.0) {
+                        String cueText = SubtitleEngine.activeTextAt(activeSubtitleCues, ct);
+                        renderCaptionText(cueText);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            handler.postDelayed(captionTickRunnable, CAPTION_TICK_MS);
+        });
+    }
+
+    private void renderCaptionText(String text) {
+        if (subtitleView == null) return;
+        String clean = text == null ? "" : text.trim();
+        if (clean.equals(lastRenderedCaption)) return;
+        lastRenderedCaption = clean;
+        if (clean.isEmpty()) {
+            subtitleView.setVisibility(View.GONE);
+        } else {
+            subtitleView.setText(clean);
+            subtitleView.setVisibility(View.VISIBLE);
+        }
     }
 
     private void configureWebView() {
@@ -1095,6 +1553,12 @@ public final class WatchActivity extends Activity {
         String focusSel = SiteConfig.PLAYER_FOCUS_SELECTOR == null ? "" : SiteConfig.PLAYER_FOCUS_SELECTOR;
         String hideChromeSnippet = (directEmbedMode && SiteConfig.HIDE_DIRECT_EMBED_CHROME)
                 ? ("if(v.readyState>=2){" + hideDirectEmbedChromeBody() + "}") : "";
+        boolean usingHtml5Sub = activeSubtitleTrack != null && activeSubtitleTrack.html5Fallback;
+        String disableEmbedTracksSnippet = usingHtml5Sub ? ""
+                : ("try{var mp=document.querySelector('media-player');"
+                + "if(mp&&mp.textTracks){for(var ti=0;ti<mp.textTracks.length;ti++)mp.textTracks[ti].mode='disabled';}"
+                + "if(v.textTracks){for(var vi=0;vi<v.textTracks.length;vi++)v.textTracks[vi].mode='disabled';}"
+                + "}catch(e){}");
         String js = "(function(){"
                 + "var vids=document.querySelectorAll('video');"
                 + "var v=null;"
@@ -1103,6 +1567,7 @@ public final class WatchActivity extends Activity {
                 + "var host=location.hostname||'';"
                 + "if(!v)return JSON.stringify({found:false,host:host});"
                 + hideChromeSnippet
+                + disableEmbedTracksSnippet
                 + "if(" + (SiteConfig.AUTO_UNMUTE ? "true" : "false") + "&&!" + (userMuted ? "true" : "false") + "&&v.muted){"
                 + "  try{v.muted=false;v.volume=1;}catch(e){}"
                 + "}"
@@ -1480,6 +1945,10 @@ public final class WatchActivity extends Activity {
                 leaveFullscreen();
                 return true;
             }
+            if (subtitleSheetVisible) {
+                toggleSubtitleSheet();
+                return true;
+            }
             if (episodeSheetVisible) {
                 toggleEpisodeSheet();
                 return true;
@@ -1529,13 +1998,16 @@ public final class WatchActivity extends Activity {
             scheduleHideOsd();
         }
 
-        // If episode sheet is open, manage navigation in episode list
-        if (episodeSheetVisible) {
+        // If subtitle or episode sheet is open, manage vertical navigation cleanly
+        if (subtitleSheetVisible || episodeSheetVisible) {
             if (key == KeyEvent.KEYCODE_DPAD_DOWN) {
-                controls.getChildAt(0).requestFocus();
+                if (subtitleSheetVisible) toggleSubtitleSheet();
+                else toggleEpisodeSheet();
                 return true;
             }
             if (key == KeyEvent.KEYCODE_DPAD_UP) {
+                if (subtitleSheetVisible) toggleSubtitleSheet();
+                else toggleEpisodeSheet();
                 focusFirstToolbarButton();
                 return true;
             }
@@ -1654,6 +2126,7 @@ public final class WatchActivity extends Activity {
         saveProgressNow();
         handler.removeCallbacks(hideControlsRunnable);
         handler.removeCallbacks(watchdogRunnable);
+        handler.removeCallbacks(captionTickRunnable);
         bgWorkers.shutdownNow();
         if (web != null) {
             web.stopLoading();
